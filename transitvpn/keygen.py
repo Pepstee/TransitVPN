@@ -39,3 +39,8 @@ def generate_keys() -> Keys:
         reality_public_key=reality_public_key,
         ss_password=ss_password,
     )
+
+
+def generate_short_id() -> str:
+    """Return a fresh REALITY short ID (8 random bytes, lowercase hex)."""
+    return os.urandom(8).hex()
