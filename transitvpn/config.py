@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+
+from transitvpn.keygen import Keys
+
+
+XRAY_VERSION = "26.7.11"
+_SHORT_ID = re.compile(r"^[0-9a-f]{2,16}$")
 
 
 @dataclass
@@ -83,3 +90,31 @@ class RelayConfig:
             raise ValueError("name must not be empty")
         if not (0 < self.listen_port < 65536):
             raise ValueError(f"listen_port out of range: {self.listen_port}")
+
+
+@dataclass(frozen=True)
+class XrayDeployment:
+    """Single source of truth for matching VLESS+REALITY peers."""
+
+    keys: Keys
+    server: str
+    target: str
+    server_name: str
+    short_id: str
+    target_verified: bool
+    port: int = 443
+    socks_port: int = 10808
+    fingerprint: str = "chrome"
+
+    def __post_init__(self) -> None:
+        if not self.server or not self.server_name:
+            raise ValueError("server and server_name must not be empty")
+        if not self.target_verified:
+            raise ValueError("REALITY target must be deliberately verified")
+        host, separator, port = self.target.rpartition(":")
+        if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
+            raise ValueError("target must be HOST:PORT")
+        if not _SHORT_ID.fullmatch(self.short_id):
+            raise ValueError("short_id must be 2-16 lowercase hexadecimal characters")
+        if not 0 < self.port < 65536 or not 0 < self.socks_port < 65536:
+            raise ValueError("ports must be between 1 and 65535")
