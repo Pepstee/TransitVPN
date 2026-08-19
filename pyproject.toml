@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transitvpn"
+version = "0.1.0"
+description = "Transit VPN management tool"
+requires-python = ">=3.10"
+dependencies = ["segno", "cryptography>=41"]
+
+[project.scripts]
+transitvpn = "transitvpn.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["transitvpn*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.importlinter]
+root_packages = ["transitvpn"]
