@@ -43,7 +43,7 @@ class CertificationInstallBoundaryTests(unittest.TestCase):
         venv_index = next(
             index
             for index, line in enumerate(before_collection)
-            if line == 'python3 -m venv "$venv"'
+            if line == 'python3 -m venv "$venv" </dev/null'
         )
         install_commands = [
             (index, line)
