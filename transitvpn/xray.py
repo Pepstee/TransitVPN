@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import hmac
 import json
 from pathlib import Path
 import platform
@@ -78,7 +79,7 @@ def verify_binary(binary: str = "xray") -> tuple[str, XrayBinaryMetadata]:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError as exc:
         raise RuntimeError("Xray binary could not be verified") from exc
-    if not hashlib.compare_digest(digest, metadata.executable_sha256):
+    if not hmac.compare_digest(digest, metadata.executable_sha256):
         raise RuntimeError(f"unverified Xray binary; pinned release {XRAY_VERSION} is required")
 
     # Do not execute an untrusted candidate to discover its version.  This is a
