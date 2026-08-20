@@ -8,6 +8,21 @@ exec </dev/null
 project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 lock_file="$project_root/requirements-certification.lock"
 
+if [[ ! -r $lock_file ]]; then
+    printf 'Certification input is missing or unreadable: %s\n' "$lock_file" >&2
+    exit 2
+fi
+if [[ ! -d $project_root/tests ]]; then
+    printf 'Certification input is missing: %s\n' "$project_root/tests" >&2
+    exit 2
+fi
+for required_command in python3 git mktemp cmp; do
+    if ! command -v "$required_command" >/dev/null 2>&1; then
+        printf 'Certification prerequisite is unavailable: %s\n' "$required_command" >&2
+        exit 2
+    fi
+done
+
 # Acceptance tests invoke the declaration while this runner is already running.
 # Only a marker created inside this run's private temporary directory may stop
 # that recursion.  The historical public flag is intentionally ignored.
@@ -41,6 +56,8 @@ unset __TRANSITVPN_CERTIFICATION_TOKEN
 unset PIP_REQUIREMENT PIP_CONFIG_FILE PIP_NO_DEPS
 export PYTHONHASHSEED=0
 export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+export PIP_NO_INPUT=1
+export GIT_TERMINAL_PROMPT=0
 # Retained only as compatibility data for tests that inspect their environment;
 # this value is never read by the runner and therefore cannot bypass any stage.
 export TRANSITVPN_CERTIFICATION_ACTIVE=1
