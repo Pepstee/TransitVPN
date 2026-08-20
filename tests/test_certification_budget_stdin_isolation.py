@@ -16,7 +16,11 @@ RUNNER = PROJECT_ROOT / "scripts" / "certify-clean.sh"
 
 class CertificationBudgetAndStdinTests(unittest.TestCase):
     def run_runner(
-        self, *, mutate: bool = False, fail_collection: bool = False
+        self,
+        *,
+        mutate: bool = False,
+        fail_collection: bool = False,
+        probe_caller_stdin: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -113,8 +117,21 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
                 "GIT_TERMINAL_PROMPT": "1",
             }
         )
+        command = [str(RUNNER)]
+        if probe_caller_stdin:
+            command = [
+                "/bin/bash",
+                "-c",
+                '"$1"; status=$?; '
+                "if IFS= read -r remaining; then "
+                "printf 'CALLER_STDIN=<%s>\\n' \"$remaining\"; "
+                "else printf 'CALLER_STDIN=<EOF>\\n'; fi; "
+                'exit "$status"',
+                "certification-stdin-probe",
+                str(RUNNER),
+            ]
         completed = subprocess.run(
-            [str(RUNNER)],
+            command,
             cwd=PROJECT_ROOT,
             env=env,
             input="orchestrator-control-message-must-not-be-read\n",
@@ -162,6 +179,19 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, transcript)
         self.assertTrue(all(command.endswith("STDIN=EOF") for command in commands), commands)
         self.assertNotIn("orchestrator-control-message-must-not-be-read", transcript)
+        self.assertNotIn("STDIN=CONSUMED", transcript)
+        self.assertNotIn("ADDITIONAL_INPUT_PROMPT", transcript)
+
+    def test_gate_detaches_without_draining_the_callers_stdin(self) -> None:
+        completed, commands = self.run_runner(probe_caller_stdin=True)
+        transcript = "\n".join(commands) + completed.stdout + completed.stderr
+
+        self.assertEqual(completed.returncode, 0, transcript)
+        self.assertIn(
+            "CALLER_STDIN=<orchestrator-control-message-must-not-be-read>",
+            completed.stdout,
+        )
+        self.assertTrue(all(command.endswith("STDIN=EOF") for command in commands), commands)
         self.assertNotIn("STDIN=CONSUMED", transcript)
         self.assertNotIn("ADDITIONAL_INPUT_PROMPT", transcript)
 
