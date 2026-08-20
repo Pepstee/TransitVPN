@@ -46,7 +46,7 @@ class CleanCertificationRunnerTests(unittest.TestCase):
                 elif [ "$1" = -m ] && [ "$2" = pip ] && [ "${CERT_FAIL_INSTALL-}" = 1 ]; then
                     printf '%s\\n' \\
                         'https://alice:super-secret@example.invalid/simple' \\
-                        'token=installation-secret' >&2
+                        'token=installation-secret' >&2  # credential-scan: allow password-token
                     exit 19
                 elif [ "$1" = -m ] && [ "$2" = pytest ] && \\
                      [ "$3" != --collect-only ] && [ "${CERT_MUTATE-}" = 1 ]; then

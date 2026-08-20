@@ -22,7 +22,7 @@ class XrayPinningFailureTests(unittest.TestCase):
         )
 
     def test_checksum_mismatch_rejects_without_execution_or_secret_disclosure(self) -> None:
-        credential = "password=checksum-secret-7d821"
+        credential = "password=checksum-secret-7d821"  # credential-scan: allow password-token
         payload = f"untrusted binary containing {credential}".encode()
 
         with tempfile.TemporaryDirectory() as directory:
@@ -47,8 +47,8 @@ class XrayPinningFailureTests(unittest.TestCase):
 
     def test_version_mismatch_rejects_without_captured_output_or_secret_disclosure(self) -> None:
         payload = b"byte-for-byte pinned test executable"
-        stdout_secret = "token=stdout-secret-a91f"
-        stderr_secret = "Authorization: Bearer stderr-secret-b62e"
+        stdout_secret = "token=stdout-secret-a91f"  # credential-scan: allow password-token
+        stderr_secret = "Authorization: Bearer stderr-secret-b62e"  # credential-scan: allow password-token
         reported_version = "Xray 0.0.0"
 
         with tempfile.TemporaryDirectory() as directory:

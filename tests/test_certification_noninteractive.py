@@ -24,7 +24,7 @@ class CertificationNonInteractiveTests(unittest.TestCase):
     def test_entrypoint_finishes_with_closed_stdin_without_prompting(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             guard = Path(temporary_directory) / "guard"
-            token = "private-recursion-token"
+            token = "private-recursion-token"  # credential-scan: allow password-token
             guard.write_text(token, encoding="utf-8")
             env = os.environ.copy()
             env.update(
