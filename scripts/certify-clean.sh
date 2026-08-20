@@ -49,7 +49,7 @@ if [[ -n ${__TRANSITVPN_CERTIFICATION_GUARD:-} && \
     exit 0
 fi
 
-temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/transitvpn-certification.XXXXXX")
+temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/transitvpn-certification.XXXXXX" </dev/null)
 cleanup() {
     rm -rf -- "$temporary_root"
 }
@@ -89,11 +89,11 @@ cd -- "$project_root"
 snapshot_tracked_state() {
     local destination=$1
     {
-        git status --porcelain=v1 --untracked-files=no
+        git status --porcelain=v1 --untracked-files=no </dev/null
         printf '\0'
-        git diff --binary HEAD --
+        git diff --binary HEAD -- </dev/null
         printf '\0'
-        git diff --binary --cached HEAD --
+        git diff --binary --cached HEAD -- </dev/null
     } >"$destination"
 }
 
@@ -109,16 +109,16 @@ export __TRANSITVPN_CERTIFICATION_TOKEN=$guard_token
 
 printf '%s\n' 'Collecting tests in clean environment...'
 collection_status=0
-"$venv/bin/python" -m pytest --collect-only -q tests || collection_status=$?
+"$venv/bin/python" -m pytest --collect-only -q tests </dev/null || collection_status=$?
 
 test_status=0
 if (( collection_status == 0 )); then
     printf '%s\n' 'Running tests in clean environment...'
-    "$venv/bin/python" -m pytest -q tests || test_status=$?
+    "$venv/bin/python" -m pytest -q tests </dev/null || test_status=$?
 fi
 
 snapshot_tracked_state "$after"
-if ! cmp -s "$before" "$after"; then
+if ! cmp -s "$before" "$after" </dev/null; then
     printf '%s\n' \
         'Certification failed: pytest changed or staged tracked artifacts.' >&2
     exit 1
