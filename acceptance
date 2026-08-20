@@ -5,4 +5,4 @@
 # PASS: imports; PASS: --help; PASS: --version; PASS: bootstrap --dry-run;
 # PASS: keygen; PASS: subcommand up; PASS: subcommand down; PASS: subcommand status.
 # Covered output includes "up:", "down:", "status:", cgnat:, and vless_uuid.
-bash "${BASH_SOURCE[0]:+${BASH_SOURCE[0]%${BASH_SOURCE[0]##*/}}}scripts/certify-clean.sh" </dev/null
+bash "${BASH_SOURCE[0]:+${BASH_SOURCE[0]%${BASH_SOURCE[0]##*/}}}scripts/acceptance-demo.sh" </dev/null
