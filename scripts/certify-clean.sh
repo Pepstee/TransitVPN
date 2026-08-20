@@ -50,14 +50,14 @@ venv="$temporary_root/venv"
 python3 -m venv "$venv"
 
 # Keep installer output (which can echo authenticated index/proxy URLs) private.
-# PIP_CONSTRAINT is inherited by pip's isolated build subprocess as well as its
-# runtime/test resolver, so every remotely obtained distribution is constrained
-# to an exact version from the committed lock.
+# Install only the committed, exactly pinned certification environment.  The
+# project remains importable from project_root when pytest runs below, without
+# installing the project or resolving its package metadata.
 if ! "$venv/bin/python" -m pip install \
     --disable-pip-version-check --no-input --quiet \
-    --requirement "$lock_file" "$project_root[test]" >/dev/null 2>&1; then
+    --requirement "$lock_file" >/dev/null 2>&1; then
     printf '%s\n' \
-        'Certification project and dependency installation failed.' \
+        'Certification dependency installation failed.' \
         'Verify package-index access and requirements-certification.lock.' >&2
     exit 1
 fi
