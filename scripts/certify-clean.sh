@@ -5,7 +5,12 @@ set -euo pipefail
 # test processes can consume orchestration input or wait for a prompt.
 exec </dev/null
 
-project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+script_path=${BASH_SOURCE[0]}
+script_directory=${script_path%/*}
+if [[ $script_directory == "$script_path" ]]; then
+    script_directory=.
+fi
+project_root=$(cd -- "$script_directory/.." && pwd -P)
 lock_file="$project_root/requirements-certification.lock"
 
 if [[ ! -r $lock_file ]]; then
@@ -83,9 +88,13 @@ cd -- "$project_root"
 
 snapshot_tracked_state() {
     local destination=$1
-    git status --porcelain=v1 --untracked-files=no >"$destination.status"
-    git diff --binary HEAD -- >"$destination.diff"
-    git diff --binary --cached HEAD -- >"$destination.cached.diff"
+    {
+        git status --porcelain=v1 --untracked-files=no
+        printf '\0'
+        git diff --binary HEAD --
+        printf '\0'
+        git diff --binary --cached HEAD --
+    } >"$destination"
 }
 
 before="$temporary_root/tracked-before"
@@ -109,9 +118,7 @@ if (( collection_status == 0 )); then
 fi
 
 snapshot_tracked_state "$after"
-if ! cmp -s "$before.status" "$after.status" || \
-   ! cmp -s "$before.diff" "$after.diff" || \
-   ! cmp -s "$before.cached.diff" "$after.cached.diff"; then
+if ! cmp -s "$before" "$after"; then
     printf '%s\n' \
         'Certification failed: pytest changed or staged tracked artifacts.' >&2
     exit 1
