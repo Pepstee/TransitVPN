@@ -35,7 +35,7 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
                     "${PYTHONHASHSEED-}" "${PYTEST_DISABLE_PLUGIN_AUTOLOAD-}" \
                     "${PIP_NO_INPUT-}" "${GIT_TERMINAL_PROMPT-}" "${PIP_CONSTRAINT-}" >> "$CERT_LOG"
                 if IFS= read -r stolen; then
-                    printf ' STDIN=CONSUMED:<%s>\\n' "$stolen" >> "$CERT_LOG"
+                    printf ' STDIN=CONSUMED:<%s> ADDITIONAL_INPUT_PROMPT\\n' "$stolen" >> "$CERT_LOG"
                 else
                     printf ' STDIN=EOF\\n' >> "$CERT_LOG"
                 fi
@@ -57,7 +57,7 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
             "#!/bin/sh\n"
             "printf 'CMD git' >> \"$CERT_LOG\"\n"
             "for argument in \"$@\"; do printf ' <%s>' \"$argument\" >> \"$CERT_LOG\"; done\n"
-            "if IFS= read -r stolen; then printf ' STDIN=CONSUMED:<%s>\\n' \"$stolen\" >> \"$CERT_LOG\"; "
+            "if IFS= read -r stolen; then printf ' STDIN=CONSUMED:<%s> ADDITIONAL_INPUT_PROMPT\\n' \"$stolen\" >> \"$CERT_LOG\"; "
             "else printf ' STDIN=EOF\\n' >> \"$CERT_LOG\"; fi\n"
             "if [ -e \"$CERT_MUTATION\" ]; then printf 'tracked mutation after tests\\n'; fi\n",
             encoding="utf-8",
@@ -68,7 +68,7 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
         mktemp.write_text(
             "#!/bin/sh\n"
             "printf 'CMD mktemp <%s>' \"$1\" >> \"$CERT_LOG\"\n"
-            "if IFS= read -r stolen; then printf ' STDIN=CONSUMED:<%s>\\n' \"$stolen\" >> \"$CERT_LOG\"; "
+            "if IFS= read -r stolen; then printf ' STDIN=CONSUMED:<%s> ADDITIONAL_INPUT_PROMPT\\n' \"$stolen\" >> \"$CERT_LOG\"; "
             "else printf ' STDIN=EOF\\n' >> \"$CERT_LOG\"; fi\n"
             "created=\"$TMPDIR/certification-temporary-root\"\n"
             "/bin/mkdir \"$created\"\n"
@@ -77,12 +77,16 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
         )
         mktemp.chmod(0o755)
 
-        for command, real_command in (("cmp", "/usr/bin/cmp"), ("rm", "/bin/rm")):
+        for command, real_command in (
+            ("cmp", "/usr/bin/cmp"),
+            ("pwd", "/bin/pwd"),
+            ("rm", "/bin/rm"),
+        ):
             wrapper = fake_bin / command
             wrapper.write_text(
                 f"#!/bin/sh\nprintf 'CMD {command}' >> \"$CERT_LOG\"\n"
                 "for argument in \"$@\"; do printf ' <%s>' \"$argument\" >> \"$CERT_LOG\"; done\n"
-                "if IFS= read -r stolen; then printf ' STDIN=CONSUMED:<%s>\\n' \"$stolen\" >> \"$CERT_LOG\"; "
+                "if IFS= read -r stolen; then printf ' STDIN=CONSUMED:<%s> ADDITIONAL_INPUT_PROMPT\\n' \"$stolen\" >> \"$CERT_LOG\"; "
                 "else printf ' STDIN=EOF\\n' >> \"$CERT_LOG\"; fi\n"
                 f"exec {real_command} \"$@\"\n",
                 encoding="utf-8",
@@ -122,7 +126,6 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertLessEqual(len(commands), 18, commands)
         self.assertTrue(commands, "the command counter observed no runner subprocesses")
-        self.assertTrue(all(command.endswith("STDIN=EOF") for command in commands), commands)
 
         python_commands = [line for line in commands if line.startswith("CMD python3")]
         self.assertEqual(len(python_commands), 4, python_commands)
@@ -145,6 +148,16 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
         self.assertLess(commands.index(collection), commands.index(execution))
         self.assertIn(" HASH=0 PLUGINS=1", collection)
         self.assertEqual(collection.count("<--collect-only>"), 1)
+
+    def test_supplied_stdin_cannot_be_consumed_or_trigger_an_input_prompt(self) -> None:
+        completed, commands = self.run_runner()
+        transcript = "\n".join(commands) + completed.stdout + completed.stderr
+
+        self.assertEqual(completed.returncode, 0, transcript)
+        self.assertTrue(all(command.endswith("STDIN=EOF") for command in commands), commands)
+        self.assertNotIn("orchestrator-control-message-must-not-be-read", transcript)
+        self.assertNotIn("STDIN=CONSUMED", transcript)
+        self.assertNotIn("ADDITIONAL_INPUT_PROMPT", transcript)
 
     def test_tracked_state_integrity_check_still_rejects_test_mutation(self) -> None:
         completed, commands = self.run_runner(mutate=True)
