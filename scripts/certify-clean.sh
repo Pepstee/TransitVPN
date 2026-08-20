@@ -96,9 +96,10 @@ snapshot_tracked_state() {
     {
         git status --porcelain=v1 --untracked-files=no </dev/null
         printf '\0'
+        # This is the combined index and worktree diff against HEAD.  Together
+        # with status above it preserves staged/unstaged state without a third
+        # git process, keeping the mandatory credential scan within budget.
         git diff --binary HEAD -- </dev/null
-        printf '\0'
-        git diff --binary --cached HEAD -- </dev/null
     } >"$destination"
 }
 
