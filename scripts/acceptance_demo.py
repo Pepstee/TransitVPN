@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import py_compile
+from pathlib import Path
 import subprocess
 import sys
 
@@ -33,6 +34,10 @@ assert all(
     )
 )
 print("PASS: imports")
+
+scanner = Path(__file__).with_name("scan-credentials.py")
+subprocess.run([sys.executable, str(scanner)], stdin=subprocess.DEVNULL, check=True)
+print("PASS: credential boundary")
 
 
 def run_cli(*arguments: str) -> str:
