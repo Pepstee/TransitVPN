@@ -43,6 +43,7 @@ UUID = re.compile(
     re.I,
 )
 IMPORT_URI = re.compile(
+    # credential-scan: allow client-import-uri
     r"\b(?:vless://[0-9a-f-]{36}@[^\s'\"<>]+|ss://[^\s'\"<>]{12,}"
     r"|wg://[^\s'\"<>]+)",
     re.I,
@@ -84,10 +85,12 @@ def candidate_files() -> list[Path]:
 
 def placeholder(value: str) -> bool:
     lowered = value.lower()
+    stripped = value.strip()
     return (
         value == "00000000-0000-4000-8000-000000000000"
         or "{" in value
         or "}" in value
+        or (stripped.startswith("+") and stripped.endswith("+"))
         or any(word in lowered for word in PLACEHOLDER_WORDS)
     )
 

@@ -28,6 +28,11 @@ for required_command in python3 git mktemp cmp; do
     fi
 done
 
+# Credential cleanliness is a prerequisite for every successful path, including
+# the private acceptance-test recursion path below.  The scanner inventories the
+# repository itself and propagates a non-zero status for any finding.
+python3 "$project_root/scripts/scan-credentials.py" </dev/null
+
 # Acceptance tests invoke the declaration while this runner is already running.
 # Only a marker created inside this run's private temporary directory may stop
 # that recursion.  The historical public flag is intentionally ignored.
