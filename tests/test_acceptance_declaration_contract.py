@@ -75,6 +75,12 @@ class AcceptanceDeclarationContractTests(unittest.TestCase):
     def test_declaration_is_data_not_an_embedded_program(self) -> None:
         commands = declarations()
         self.assertEqual(commands, [commands[0]], "each declaration must be a standalone command")
+        physical_commands = [
+            line
+            for line in ACCEPTANCE.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(physical_commands, commands, "declaration must be one physical command line")
         command = commands[0]
         self.assertRegex(command, r"^bash\s+")
         self.assertIn("scripts/acceptance-demo.sh", command)
@@ -83,6 +89,7 @@ class AcceptanceDeclarationContractTests(unittest.TestCase):
         self.assertNotRegex(command, r"<<-?\s*['\"]?\w+")
         self.assertNotRegex(command, r"(?:^|[\s;|&])(?:eval|source|\.)\s")
         self.assertNotRegex(command, r"\$\{?0(?:\}|\b)")
+        self.assertNotRegex(command, r"(?:;|&&|\|\||(?<![<>])\|(?![&]))")
 
     def test_acceptance_path_has_no_credential_fixture(self) -> None:
         source = ACCEPTANCE.read_text(encoding="utf-8") + "\n" + DEMO.read_text(encoding="utf-8")
