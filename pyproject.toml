@@ -9,6 +9,9 @@ description = "Transit VPN management tool"
 requires-python = ">=3.10"
 dependencies = ["segno", "cryptography>=41"]
 
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
 [project.scripts]
 transitvpn = "transitvpn.cli:main"
 
