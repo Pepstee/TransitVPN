@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 
@@ -96,20 +97,68 @@ def verify_binary(binary: str = "xray") -> tuple[str, XrayBinaryMetadata]:
     return str(path), metadata
 
 
-def validate_configs(configs: list[dict[str, Any]], binary: str = "xray") -> dict[str, str]:
-    """Verify binary identity and ask that exact binary to parse every config."""
+def validate_configs(
+    configs: Mapping[str, dict[str, Any]] | Sequence[dict[str, Any]],
+    binary: str = "xray",
+) -> dict[str, str]:
+    """Validate generated configs with the byte-for-byte pinned Xray executable.
+
+    Xray's output is deliberately captured and discarded: validation diagnostics
+    can echo values from a configuration, including private keys and client IDs.
+    Callers get a config name and a remediation hint without credential content.
+    """
     executable, metadata = verify_binary(binary)
-    for config in configs:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as handle:
-            json.dump(config, handle)
-            handle.flush()
-            subprocess.run(
-                [executable, "run", "-test", "-config", handle.name],
-                check=True,
-                text=True,
-                capture_output=True,
-                timeout=20,
-            )
+    if isinstance(configs, Mapping):
+        named_configs = list(configs.items())
+    else:
+        default_names = ("server", "client")
+        named_configs = [
+            (default_names[index] if index < len(default_names) else f"config {index + 1}", config)
+            for index, config in enumerate(configs)
+        ]
+
+    with tempfile.TemporaryDirectory(prefix="transitvpn-xray-validation-") as directory:
+        for name, config in named_configs:
+            safe_name = str(name) if str(name) in {"server", "client"} else "generated"
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=directory,
+                    prefix=f"{safe_name}-",
+                    suffix=".json",
+                    delete=False,
+                ) as handle:
+                    json.dump(config, handle)
+                    config_path = Path(handle.name)
+            except (OSError, TypeError, ValueError):
+                raise RuntimeError(
+                    f"{safe_name} Xray configuration is not valid JSON; regenerate it"
+                ) from None
+
+            try:
+                subprocess.run(
+                    [executable, "run", "-test", "-config", str(config_path)],
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                    stdin=subprocess.DEVNULL,
+                    timeout=20,
+                )
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(
+                    f"{safe_name} Xray configuration validation timed out with pinned "
+                    f"Xray {XRAY_VERSION}"
+                ) from None
+            except subprocess.CalledProcessError:
+                raise RuntimeError(
+                    f"{safe_name} Xray configuration is invalid, unsupported, or stale for "
+                    f"pinned Xray {XRAY_VERSION}; regenerate it for this release"
+                ) from None
+            except OSError:
+                raise RuntimeError(
+                    f"pinned Xray {XRAY_VERSION} could not validate the {safe_name} configuration"
+                ) from None
     return {
         "version": XRAY_VERSION,
         "sha256": metadata.executable_sha256,

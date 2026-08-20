@@ -74,7 +74,13 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
     )
     server_cfg = build_server_config(deployment)
     client_cfg = build_client_config(deployment)
-    identity = validate_configs([server_cfg, client_cfg], args.xray_binary)
+    try:
+        identity = validate_configs(
+            {"server": server_cfg, "client": client_cfg}, args.xray_binary
+        )
+    except RuntimeError as exc:
+        print(f"bootstrap: error: {exc}", file=sys.stderr)
+        return 1
     print(f"validated server and client with Xray {identity['version']} ({identity['sha256']})")
 
     if not args.dry_run:
