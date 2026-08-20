@@ -109,7 +109,10 @@ class CleanCertificationRunnerTests(unittest.TestCase):
         self.assertRegex(source, r"(?m)^set -euo pipefail$")
         self.assertRegex(source, r"(?m)^exec </dev/null$")
         self.assertRegex(source, r"(?m)^trap cleanup EXIT HUP INT TERM$")
-        self.assertRegex(source, r'(?m)^\s*rm -rf -- "\$temporary_root"$')
+        self.assertRegex(
+            source,
+            r'(?m)^\s*rm -rf -- "\$temporary_root" </dev/null$',
+        )
 
     def test_runner_uses_no_credential_arguments_or_embedded_fixtures(self) -> None:
         source = RUNNER.read_text(encoding="utf-8")
