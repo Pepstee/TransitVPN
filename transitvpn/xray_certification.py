@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 import secrets
 import socket
+import socketserver
 import subprocess
 import tempfile
 import threading
@@ -32,6 +33,21 @@ class XrayTunnelCertification:
 
     version: str
     response_bytes: int
+
+    def operator_record(self) -> dict[str, object]:
+        """Render credential-free evidence without overstating its scope."""
+        return {
+            "version": self.version,
+            "response_bytes": self.response_bytes,
+            "local_evidence": {
+                "scope": "loopback",
+                "proxy": "observed",
+                "routing": "observed",
+                "dns": "observed",
+                "cleanup": "observed",
+            },
+            "external_recovery": {"status": "unprovisioned", "observed": False},
+        }
 
 
 class _Responder(ThreadingHTTPServer):
@@ -168,7 +184,10 @@ def _probe(socks_port: int, upstream_port: int, expected_body: bytes, timeout: f
             if _receive_exact(connection, 2, deadline) != b"\x05\x00":
                 raise XrayCertificationError("client SOCKS endpoint rejected no-auth negotiation")
 
-            request = b"\x05\x01\x00\x01" + socket.inet_aton(_LOOPBACK)
+            # Domain-form SOCKS establishes proxy-side DNS handling as well as
+            # routing; an IP-form request cannot support a DNS assertion.
+            hostname = b"localhost"
+            request = b"\x05\x01\x00\x03" + bytes((len(hostname),)) + hostname
             request += upstream_port.to_bytes(2, "big")
             connection.sendall(request)
             reply = _receive_exact(connection, 4, deadline)
@@ -192,7 +211,7 @@ def _probe(socks_port: int, upstream_port: int, expected_body: bytes, timeout: f
                 response.extend(chunk)
     except XrayCertificationError:
         raise
-    except (OSError, ValueError) as exc:
+    except Exception as exc:
         raise XrayCertificationError("application-data tunnel probe failed") from exc
 
     header, separator, body = bytes(response).partition(b"\r\n\r\n")
@@ -215,15 +234,36 @@ def _stop(process: subprocess.Popen[bytes] | None) -> bool:
             process.kill()
             process.wait(timeout=2)
         return process.poll() is not None
-    except (OSError, subprocess.SubprocessError):
+    except Exception:
         return False
 
 
 def _stop_all(*processes: subprocess.Popen[bytes] | None) -> None:
     """Attempt every child cleanup and fail closed unless all exits are observed."""
-    stopped = [_stop(process) for process in processes]
-    if not all(stopped):
+    stopped = True
+    for process in processes:
+        try:
+            stopped = _stop(process) and stopped
+        except Exception:
+            stopped = False
+    if not stopped:
         raise XrayCertificationError("Xray process cleanup could not be confirmed")
+
+
+def _stop_responder(responder: socketserver.TCPServer, thread: threading.Thread) -> bool:
+    stopped = True
+    for operation in (responder.shutdown, responder.server_close):
+        try:
+            operation()
+        except Exception:
+            stopped = False
+    try:
+        thread.join(timeout=2)
+        if thread.is_alive():
+            stopped = False
+    except Exception:
+        stopped = False
+    return stopped
 
 
 def certify_local_tunnel(
@@ -250,7 +290,14 @@ def certify_local_tunnel(
     except OSError as exc:
         raise XrayCertificationError("local HTTP responder could not be started") from exc
     responder_thread = threading.Thread(target=responder.serve_forever, daemon=True)
-    responder_thread.start()
+    try:
+        responder_thread.start()
+    except Exception as exc:
+        try:
+            responder.server_close()
+        except Exception:
+            pass
+        raise XrayCertificationError("local HTTP responder could not be started") from exc
     try:
         server_port = _ephemeral_port()
         socks_port = _ephemeral_port()
@@ -301,9 +348,12 @@ def certify_local_tunnel(
                     )
             return XrayTunnelCertification(XRAY_VERSION, response_bytes)
     finally:
+        cleanup_failed = False
         try:
             _stop_all(client_process, server_process)
-        finally:
-            responder.shutdown()
-            responder.server_close()
-            responder_thread.join(timeout=2)
+        except Exception:
+            cleanup_failed = True
+        if not _stop_responder(responder, responder_thread):
+            cleanup_failed = True
+        if cleanup_failed:
+            raise XrayCertificationError("Xray certification cleanup could not be confirmed")
