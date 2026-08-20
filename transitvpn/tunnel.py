@@ -5,6 +5,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from transitvpn.xray import verify_binary
+
 # Seconds to let the proxy settle before confirming it is still alive. A bad
 # config or an already-bound port makes xray exit within milliseconds, so a
 # brief liveness check turns "I spawned a process" into "the tunnel is up".
@@ -22,11 +24,11 @@ def start_tunnel(config_path: str, state_dir: str) -> tuple[int | None, str | No
         return None, f"invalid config JSON: {e}"
 
     binary = os.environ.get("TRANSITVPN_PROXY_BIN", "xray")
-    # TRANSITVPN_PROXY_BIN may be "python -c ..." so split it
-    if " " in binary:
-        cmd = binary.split(None, 2) + ["-config", config_path]
-    else:
-        cmd = [binary, "-config", config_path]
+    try:
+        executable, _ = verify_binary(binary)
+    except RuntimeError as exc:
+        return None, str(exc)
+    cmd = [executable, "run", "-config", config_path]
 
     state = Path(state_dir)
     state.mkdir(parents=True, exist_ok=True)
