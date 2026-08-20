@@ -107,6 +107,7 @@ class CleanCertificationRunnerTests(unittest.TestCase):
         self.assertEqual(source.splitlines()[0], "#!/usr/bin/env bash")
         self.assertEqual(stat.S_IMODE(RUNNER.stat().st_mode) & 0o111, 0o111)
         self.assertRegex(source, r"(?m)^set -euo pipefail$")
+        self.assertRegex(source, r"(?m)^exec </dev/null$")
         self.assertRegex(source, r"(?m)^trap cleanup EXIT HUP INT TERM$")
         self.assertRegex(source, r'(?m)^\s*rm -rf -- "\$temporary_root"$')
 
@@ -131,9 +132,11 @@ class CleanCertificationRunnerTests(unittest.TestCase):
         self.assertFalse(temporary_root.exists(), "EXIT trap left its temporary tree behind")
         self.assertEqual([call.split("|ACTIVE=", 1)[0] for call in recorded], [
             f"CALL|-m|venv|{temporary_root / 'venv'}",
-            f"CALL|-m|pip|install|--disable-pip-version-check|--quiet|{PROJECT_ROOT}[test]",
-            "CALL|-m|pytest|--collect-only|-q",
-            "CALL|-m|pytest|-q",
+            "CALL|-m|pip|install|--disable-pip-version-check|--no-input|--quiet|"
+            f"--requirement|{PROJECT_ROOT / 'requirements-certification.lock'}|"
+            f"{PROJECT_ROOT}[test]",
+            "CALL|-m|pytest|--collect-only|-q|tests",
+            "CALL|-m|pytest|-q|tests",
         ])
         self.assertTrue(all("|ACTIVE=1|" in call for call in recorded))
         self.assertEqual(

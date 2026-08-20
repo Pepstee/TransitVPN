@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Certification is unattended.  Close stdin once so neither installers nor
+# test processes can consume orchestration input or wait for a prompt.
+exec </dev/null
+
 project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 lock_file="$project_root/requirements-certification.lock"
 
@@ -50,7 +54,8 @@ python3 -m venv "$venv"
 # runtime/test resolver, so every remotely obtained distribution is constrained
 # to an exact version from the committed lock.
 if ! "$venv/bin/python" -m pip install \
-    --disable-pip-version-check --quiet "$project_root[test]" >/dev/null 2>&1; then
+    --disable-pip-version-check --no-input --quiet \
+    --requirement "$lock_file" "$project_root[test]" >/dev/null 2>&1; then
     printf '%s\n' \
         'Certification project and dependency installation failed.' \
         'Verify package-index access and requirements-certification.lock.' >&2
@@ -78,12 +83,12 @@ export __TRANSITVPN_CERTIFICATION_TOKEN=$guard_token
 
 printf '%s\n' 'Collecting tests in clean environment...'
 collection_status=0
-"$venv/bin/python" -m pytest --collect-only -q || collection_status=$?
+"$venv/bin/python" -m pytest --collect-only -q tests || collection_status=$?
 
 test_status=0
 if (( collection_status == 0 )); then
     printf '%s\n' 'Running tests in clean environment...'
-    "$venv/bin/python" -m pytest -q || test_status=$?
+    "$venv/bin/python" -m pytest -q tests || test_status=$?
 fi
 
 snapshot_tracked_state "$after"
