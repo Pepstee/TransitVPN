@@ -14,6 +14,11 @@ cd -- "$project_root"
 
 unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONINSPECT
 export PYTHONHASHSEED=0
+export CI=true
+export GIT_TERMINAL_PROMPT=0
+export SSH_ASKPASS=/bin/false
+export SSH_ASKPASS_REQUIRE=force
+export PIP_NO_INPUT=1
 
 python3 - <<'PY'
 from __future__ import annotations
