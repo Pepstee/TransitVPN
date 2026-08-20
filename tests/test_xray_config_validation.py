@@ -7,13 +7,15 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from transitvpn import cli
+from transitvpn import xray
 from transitvpn.config import XrayDeployment
 from transitvpn.keygen import Keys
 from transitvpn.server import build_client_config, build_server_config
-from transitvpn import xray
 
 
 class PinnedConfigValidationTests(unittest.TestCase):
@@ -108,6 +110,89 @@ class PinnedConfigValidationTests(unittest.TestCase):
         self.assertNotIn(credential, str(raised.exception))
         which.assert_called_once_with(str(requested))
         run.assert_not_called()
+
+    def test_missing_requested_binary_fails_closed_without_system_fallback(self) -> None:
+        requested = "/fixture/absent-pinned-xray"
+
+        def lookup(name: str) -> None:
+            self.assertEqual(name, requested)
+            return None
+
+        with (
+            mock.patch.object(xray, "_platform_key", return_value=self.PLATFORM),
+            mock.patch.object(xray.shutil, "which", side_effect=lookup) as which,
+            mock.patch.object(xray.subprocess, "run") as run,
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            xray.validate_configs({"server": {}}, binary=requested)
+
+        self.assertIn("binary not found", str(raised.exception))
+        which.assert_called_once_with(requested)
+        run.assert_not_called()
+
+    def test_non_executable_requested_binary_fails_closed_without_system_fallback(self) -> None:
+        payload = b"synthetic pinned bytes without execute permission"
+        metadata = xray.XrayBinaryMetadata(
+            "Xray-test.zip", hashlib.sha256(payload).hexdigest()
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            requested = Path(directory, "pinned-xray")
+            requested.write_bytes(payload)
+            requested.chmod(0o600)
+
+            def lookup(name: str) -> None:
+                self.assertEqual(name, str(requested))
+                return None
+
+            with (
+                mock.patch.object(xray, "_platform_key", return_value=self.PLATFORM),
+                mock.patch.object(xray.shutil, "which", side_effect=lookup) as which,
+                mock.patch.dict(xray.XRAY_BINARIES, {self.PLATFORM: metadata}, clear=True),
+                mock.patch.object(xray.subprocess, "run") as run,
+                self.assertRaises(RuntimeError) as raised,
+            ):
+                xray.validate_configs({"client": {}}, binary=str(requested))
+
+        self.assertIn("binary not found", str(raised.exception))
+        which.assert_called_once_with(str(requested))
+        run.assert_not_called()
+
+    def test_rejected_config_cannot_be_accepted_as_bootstrap_artefact(self) -> None:
+        fixture_source = f"""#!/usr/bin/env python3
+import sys
+if sys.argv[1:] == [\"version\"]:
+    print(\"Xray {xray.XRAY_VERSION}\")
+    raise SystemExit(0)
+raise SystemExit(23)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "pinned-xray"
+            candidate.write_text(fixture_source, encoding="utf-8")
+            candidate.chmod(0o700)
+            metadata = xray.XrayBinaryMetadata(
+                "Xray-test.zip", hashlib.sha256(candidate.read_bytes()).hexdigest()
+            )
+            args = SimpleNamespace(
+                host="vpn.example.test",
+                target="cover.example.test:443",
+                server_name="cover.example.test",
+                target_verified=True,
+                xray_binary=str(candidate),
+                dry_run=False,
+            )
+
+            with (
+                mock.patch.object(xray, "_platform_key", return_value=self.PLATFORM),
+                mock.patch.dict(xray.XRAY_BINARIES, {self.PLATFORM: metadata}, clear=True),
+                mock.patch("transitvpn.keygen.generate_keys", return_value=self.deployment().keys),
+                mock.patch("transitvpn.keygen.generate_short_id", return_value="0123456789abcdef"),
+                mock.patch.object(cli, "_atomic_write") as write,
+            ):
+                status = cli._cmd_bootstrap(args)
+
+            self.assertEqual(status, 1)
+            write.assert_not_called()
 
     def test_failed_validation_discards_process_output_and_config_credentials(self) -> None:
         config_secret = "privateKey=config-secret-184e"  # credential-scan: allow password-token
