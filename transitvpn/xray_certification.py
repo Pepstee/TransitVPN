@@ -188,22 +188,29 @@ def _probe(socks_port: int, upstream_port: int, expected_body: bytes, timeout: f
     return len(body)
 
 
-def _stop(process: subprocess.Popen[bytes] | None) -> None:
+def _stop(process: subprocess.Popen[bytes] | None) -> bool:
+    """Stop one child and report whether its exit was observed."""
     if process is None:
-        return
+        return True
     try:
         if process.poll() is not None:
-            return
+            return True
         process.terminate()
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=2)
+        return process.poll() is not None
     except (OSError, subprocess.SubprocessError):
-        # Cleanup is best-effort and must not replace the closed failure that
-        # caused it. TemporaryDirectory still removes credential material.
-        return
+        return False
+
+
+def _stop_all(*processes: subprocess.Popen[bytes] | None) -> None:
+    """Attempt every child cleanup and fail closed unless all exits are observed."""
+    stopped = [_stop(process) for process in processes]
+    if not all(stopped):
+        raise XrayCertificationError("Xray process cleanup could not be confirmed")
 
 
 def certify_local_tunnel(
@@ -281,8 +288,9 @@ def certify_local_tunnel(
                     )
             return XrayTunnelCertification(XRAY_VERSION, response_bytes)
     finally:
-        _stop(client_process)
-        _stop(server_process)
-        responder.shutdown()
-        responder.server_close()
-        responder_thread.join(timeout=2)
+        try:
+            _stop_all(client_process, server_process)
+        finally:
+            responder.shutdown()
+            responder.server_close()
+            responder_thread.join(timeout=2)
