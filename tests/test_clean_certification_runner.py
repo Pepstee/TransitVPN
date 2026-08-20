@@ -133,8 +133,7 @@ class CleanCertificationRunnerTests(unittest.TestCase):
         self.assertEqual([call.split("|ACTIVE=", 1)[0] for call in recorded], [
             f"CALL|-m|venv|{temporary_root / 'venv'}",
             "CALL|-m|pip|install|--disable-pip-version-check|--no-input|--quiet|"
-            f"--requirement|{PROJECT_ROOT / 'requirements-certification.lock'}|"
-            f"{PROJECT_ROOT}[test]",
+            f"--requirement|{PROJECT_ROOT / 'requirements-certification.lock'}",
             "CALL|-m|pytest|--collect-only|-q|tests",
             "CALL|-m|pytest|-q|tests",
         ])
@@ -181,7 +180,7 @@ class CleanCertificationRunnerTests(unittest.TestCase):
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertEqual(len(recorded), 2, recorded)
-        self.assertIn("Certification project and dependency installation failed.", completed.stderr)
+        self.assertIn("Certification dependency installation failed.", completed.stderr)
         self.assertNotIn("super-secret", diagnostics)
         self.assertNotIn("installation-secret", diagnostics)
         self.assertNotIn("Collecting tests", diagnostics)
