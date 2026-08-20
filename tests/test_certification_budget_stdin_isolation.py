@@ -15,7 +15,9 @@ RUNNER = PROJECT_ROOT / "scripts" / "certify-clean.sh"
 
 
 class CertificationBudgetAndStdinTests(unittest.TestCase):
-    def run_runner(self, *, mutate: bool = False) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    def run_runner(
+        self, *, mutate: bool = False, fail_collection: bool = False
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -42,6 +44,9 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
                 if [ "$1" = -m ] && [ "$2" = venv ]; then
                     /bin/mkdir -p "$3/bin"
                     /bin/cp "$0" "$3/bin/python"
+                elif [ "$1" = -m ] && [ "$2" = pytest ] && \
+                     [ "$3" = --collect-only ] && [ "${CERT_FAIL_COLLECTION-0}" = 1 ]; then
+                    exit 7
                 elif [ "$1" = -m ] && [ "$2" = pytest ] && \
                      [ "$3" != --collect-only ] && [ "${CERT_MUTATE-0}" = 1 ]; then
                     : > "$CERT_MUTATION"
@@ -100,6 +105,7 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
                 "TMPDIR": str(root),
                 "CERT_LOG": str(log),
                 "CERT_MUTATE": "1" if mutate else "0",
+                "CERT_FAIL_COLLECTION": "1" if fail_collection else "0",
                 "CERT_MUTATION": str(mutation),
                 "PYTHONHASHSEED": "hostile",
                 "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "0",
@@ -167,6 +173,27 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
         self.assertNotIn("All acceptance checks passed.", completed.stdout + completed.stderr)
         self.assertEqual(sum(line.startswith("CMD git") for line in commands), 6, commands)
         self.assertEqual(sum(line.startswith("CMD cmp") for line in commands), 1, commands)
+
+    def test_collection_failure_is_bounded_detached_and_never_runs_tests(self) -> None:
+        completed, commands = self.run_runner(fail_collection=True)
+        transcript = "\n".join(commands) + completed.stdout + completed.stderr
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertLessEqual(len(commands), 18, commands)
+        self.assertTrue(all(command.endswith("STDIN=EOF") for command in commands), commands)
+        self.assertEqual(
+            sum(" <-m> <pytest> <--collect-only> <-q> <tests>" in line for line in commands),
+            1,
+            commands,
+        )
+        self.assertFalse(
+            any(" <-m> <pytest> <-q> <tests>" in line for line in commands), commands
+        )
+        self.assertNotIn("STDIN=CONSUMED", transcript)
+        self.assertNotIn("ADDITIONAL_INPUT_PROMPT", transcript)
+        self.assertNotIn("Running tests in clean environment", transcript)
+        self.assertIn("pytest did not complete successfully", completed.stderr)
+        self.assertNotIn("All acceptance checks passed.", transcript)
 
 
 if __name__ == "__main__":
