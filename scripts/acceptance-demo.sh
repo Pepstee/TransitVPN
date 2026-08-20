@@ -20,4 +20,4 @@ export SSH_ASKPASS=/bin/false
 export SSH_ASKPASS_REQUIRE=force
 export PIP_NO_INPUT=1
 
-python3 -m scripts.acceptance_demo
+exec python3 -m scripts.acceptance_demo </dev/null
