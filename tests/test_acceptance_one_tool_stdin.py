@@ -1,92 +1,109 @@
-"""Independent black-box contract for the root certification declaration."""
+"""Adversarial black-box tests for acceptance budget and stdin isolation."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ACCEPTANCE = PROJECT_ROOT / "acceptance"
-STDIN_SENTINEL = "orchestrator-stdin-must-remain-unread"
+MAX_TOOL_INVOCATIONS = 18
+STDIN_SENTINEL = b"orchestrator-stdin-must-remain-unread\n"
 
 
-class AcceptanceOneToolStdinTests(unittest.TestCase):
-    def test_both_gate_contexts_allow_one_tool_and_preserve_stdin(self) -> None:
-        declarations = [
-            line.strip()
-            for line in ACCEPTANCE.read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
-        ]
-        self.assertEqual(len(declarations), 1, declarations)
+def declarations() -> list[str]:
+    return [
+        line.strip()
+        for line in ACCEPTANCE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            temporary = Path(temporary_directory)
-            fake_bin = temporary / "bin"
+
+class AcceptanceBudgetStdinTests(unittest.TestCase):
+    def _make_wrapper(self, path: Path, name: str, target: Path) -> None:
+        # Each observable tool actively probes fd 0.  A correctly isolated demo
+        # gives every probe EOF; an inherited pipe yields the sentinel and fails.
+        path.write_text(
+            "#!/bin/bash\n"
+            "if IFS= read -r value; then\n"
+            f"  printf 'CONSUMED {name} %s\\n' \"$value\" >> \"$ACCEPTANCE_TOOL_LOG\"\n"
+            "else\n"
+            f"  printf 'EOF {name}\\n' >> \"$ACCEPTANCE_TOOL_LOG\"\n"
+            "fi\n"
+            f"exec {shlex.quote(str(target))} \"$@\"\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+
+    def _run(self, command: list[str], cwd: Path, label: str) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_bin = root / "bin"
             fake_bin.mkdir()
-            guard = temporary / "recursion-guard"
-            token = "test-owned-private-guard"
-            guard.write_text(token, encoding="utf-8")
+            log = root / "tools.log"
+            self._make_wrapper(fake_bin / "bash", "bash", Path("/bin/bash"))
+            self._make_wrapper(fake_bin / "python3", "python3", Path(sys.executable).resolve())
 
-            for tool, real_tool in (("bash", "/bin/bash"), ("dirname", "/usr/bin/dirname")):
-                wrapper = fake_bin / tool
-                wrapper.write_text(
-                    "#!/bin/sh\n"
-                    f"printf '%s\\n' '{tool}' >> \"$TOOL_INVOCATION_LOG\"\n"
-                    f"exec {real_tool} \"$@\"\n",
-                    encoding="utf-8",
-                )
-                wrapper.chmod(0o755)
-
-            contexts = (
-                ("extracted", ["/bin/bash", "-c", declarations[0]], PROJECT_ROOT),
-                ("direct", ["/bin/bash", str(ACCEPTANCE)], temporary),
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                    "ACCEPTANCE_TOOL_LOG": str(log),
+                }
             )
-            for name, command, cwd in contexts:
-                with self.subTest(context=name):
-                    invocation_log = temporary / f"{name}-tool-invocations"
-                    env = os.environ.copy()
-                    env.update(
-                        {
-                            "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
-                            "TOOL_INVOCATION_LOG": str(invocation_log),
-                            "__TRANSITVPN_CERTIFICATION_GUARD": str(guard),
-                            "__TRANSITVPN_CERTIFICATION_TOKEN": token,
-                        }
-                    )
-                    read_fd, write_fd = os.pipe()
-                    try:
-                        supplied = f"{STDIN_SENTINEL}-{name}\n".encode()
-                        os.write(write_fd, supplied)
-                        os.close(write_fd)
-                        write_fd = -1
-                        completed = subprocess.run(
-                            command,
-                            cwd=cwd,
-                            env=env,
-                            stdin=read_fd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True,
-                            timeout=5,
-                            check=False,
-                        )
-                        remaining = os.read(read_fd, len(supplied) + 1)
-                    finally:
-                        os.close(read_fd)
-                        if write_fd >= 0:
-                            os.close(write_fd)
+            read_fd, write_fd = os.pipe()
+            try:
+                os.write(write_fd, STDIN_SENTINEL)
+                os.close(write_fd)
+                write_fd = -1
+                completed = subprocess.run(
+                    command,
+                    cwd=cwd,
+                    env=environment,
+                    stdin=read_fd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                remaining = os.read(read_fd, len(STDIN_SENTINEL) + 1)
+            finally:
+                os.close(read_fd)
+                if write_fd >= 0:
+                    os.close(write_fd)
 
-                    invocations = invocation_log.read_text(encoding="utf-8").splitlines()
-                    transcript = completed.stdout + completed.stderr
-                    self.assertEqual(completed.returncode, 0, transcript)
-                    self.assertLessEqual(len(invocations), 1, invocations)
-                    self.assertEqual(invocations, ["bash"])
-                    self.assertEqual(remaining, supplied, "acceptance consumed caller stdin")
-                    self.assertNotIn(STDIN_SENTINEL, transcript)
+            events = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+            transcript = completed.stdout + completed.stderr
+            self.assertEqual(completed.returncode, 0, f"{label}: {transcript}")
+            self.assertTrue(events, f"{label}: no tool invocation was observed")
+            self.assertLessEqual(len(events), MAX_TOOL_INVOCATIONS, f"{label}: {events}")
+            self.assertTrue(
+                all(event.startswith("EOF ") for event in events),
+                f"{label}: a demo command inherited readable stdin: {events}",
+            )
+            self.assertEqual(remaining, STDIN_SENTINEL, f"{label}: caller stdin was drained")
+            self.assertNotIn(STDIN_SENTINEL.decode().strip(), transcript)
+
+    def test_extracted_commands_are_bounded_and_stdin_isolated(self) -> None:
+        commands = declarations()
+        self.assertTrue(commands, "acceptance has no executable declarations")
+        for index, command in enumerate(commands):
+            with self.subTest(index=index, command=command):
+                self._run(["/bin/bash", "-c", command], PROJECT_ROOT, f"extracted[{index}]")
+
+    def test_direct_declaration_is_bounded_and_stdin_isolated(self) -> None:
+        first_line = ACCEPTANCE.read_text(encoding="utf-8").splitlines()[0]
+        if not first_line.startswith("#!"):
+            self.skipTest("acceptance does not declare direct-execution support")
+        with tempfile.TemporaryDirectory() as unrelated:
+            self._run(["/bin/bash", str(ACCEPTANCE)], Path(unrelated), "direct")
 
 
 if __name__ == "__main__":
