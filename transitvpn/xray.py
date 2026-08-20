@@ -164,3 +164,14 @@ def validate_configs(
         "sha256": metadata.executable_sha256,
         "checksum_source": metadata.checksum_source,
     }
+
+
+def certify_local_tunnel(binary: str = "xray", *, timeout: float = 10.0) -> Any:
+    """Run the self-cleaning local server-to-client data-path certification.
+
+    The import is deliberately local so the certification implementation can
+    reuse this module's verification boundary without creating an import cycle.
+    """
+    from transitvpn.xray_certification import certify_local_tunnel as certify
+
+    return certify(binary, timeout=timeout)
