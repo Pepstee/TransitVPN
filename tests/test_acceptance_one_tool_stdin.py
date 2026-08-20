@@ -15,7 +15,7 @@ STDIN_SENTINEL = "orchestrator-stdin-must-remain-unread"
 
 
 class AcceptanceOneToolStdinTests(unittest.TestCase):
-    def test_enforced_harness_allows_one_tool_and_preserves_stdin(self) -> None:
+    def test_both_gate_contexts_allow_one_tool_and_preserve_stdin(self) -> None:
         declarations = [
             line.strip()
             for line in ACCEPTANCE.read_text(encoding="utf-8").splitlines()
@@ -27,7 +27,6 @@ class AcceptanceOneToolStdinTests(unittest.TestCase):
             temporary = Path(temporary_directory)
             fake_bin = temporary / "bin"
             fake_bin.mkdir()
-            invocation_log = temporary / "tool-invocations"
             guard = temporary / "recursion-guard"
             token = "test-owned-private-guard"
             guard.write_text(token, encoding="utf-8")
@@ -42,45 +41,52 @@ class AcceptanceOneToolStdinTests(unittest.TestCase):
                 )
                 wrapper.chmod(0o755)
 
-            env = os.environ.copy()
-            env.update(
-                {
-                    "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
-                    "TOOL_INVOCATION_LOG": str(invocation_log),
-                    "__TRANSITVPN_CERTIFICATION_GUARD": str(guard),
-                    "__TRANSITVPN_CERTIFICATION_TOKEN": token,
-                }
+            contexts = (
+                ("extracted", ["/bin/bash", "-c", declarations[0]], PROJECT_ROOT),
+                ("direct", ["/bin/bash", str(ACCEPTANCE)], temporary),
             )
-            harness = (
-                f"{declarations[0]}\n"
-                "status=$?\n"
-                "if IFS= read -r remaining; then\n"
-                "  printf 'HARNESS_STDIN=<%s>\\n' \"$remaining\"\n"
-                "else\n"
-                "  printf '%s\\n' 'Reading additional input from stdin...'\n"
-                "fi\n"
-                "exit \"$status\"\n"
-            )
-            completed = subprocess.run(
-                ["/bin/bash", "-c", harness],
-                cwd=PROJECT_ROOT,
-                env=env,
-                input=f"{STDIN_SENTINEL}\n",
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=5,
-                check=False,
-            )
+            for name, command, cwd in contexts:
+                with self.subTest(context=name):
+                    invocation_log = temporary / f"{name}-tool-invocations"
+                    env = os.environ.copy()
+                    env.update(
+                        {
+                            "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
+                            "TOOL_INVOCATION_LOG": str(invocation_log),
+                            "__TRANSITVPN_CERTIFICATION_GUARD": str(guard),
+                            "__TRANSITVPN_CERTIFICATION_TOKEN": token,
+                        }
+                    )
+                    read_fd, write_fd = os.pipe()
+                    try:
+                        supplied = f"{STDIN_SENTINEL}-{name}\n".encode()
+                        os.write(write_fd, supplied)
+                        os.close(write_fd)
+                        write_fd = -1
+                        completed = subprocess.run(
+                            command,
+                            cwd=cwd,
+                            env=env,
+                            stdin=read_fd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            timeout=5,
+                            check=False,
+                        )
+                        remaining = os.read(read_fd, len(supplied) + 1)
+                    finally:
+                        os.close(read_fd)
+                        if write_fd >= 0:
+                            os.close(write_fd)
 
-            invocations = invocation_log.read_text(encoding="utf-8").splitlines()
-
-        transcript = completed.stdout + completed.stderr
-        self.assertEqual(completed.returncode, 0, transcript)
-        self.assertLessEqual(len(invocations), 1, invocations)
-        self.assertEqual(invocations, ["bash"])
-        self.assertIn(f"HARNESS_STDIN=<{STDIN_SENTINEL}>", completed.stdout)
-        self.assertNotIn("Reading additional input from stdin...", transcript)
+                    invocations = invocation_log.read_text(encoding="utf-8").splitlines()
+                    transcript = completed.stdout + completed.stderr
+                    self.assertEqual(completed.returncode, 0, transcript)
+                    self.assertLessEqual(len(invocations), 1, invocations)
+                    self.assertEqual(invocations, ["bash"])
+                    self.assertEqual(remaining, supplied, "acceptance consumed caller stdin")
+                    self.assertNotIn(STDIN_SENTINEL, transcript)
 
 
 if __name__ == "__main__":
