@@ -81,6 +81,54 @@ class PinnedConfigValidationTests(unittest.TestCase):
             self.assertIs(call.kwargs["stdin"], subprocess.DEVNULL)
         self.assertEqual(identity["sha256"], metadata.executable_sha256)
 
+    def test_stale_generated_server_and_client_shapes_are_rejected_by_pinned_xray(self) -> None:
+        fixture_source = f"""#!/usr/bin/env python3
+import json
+import sys
+
+if sys.argv[1:] == ["version"]:
+    print("Xray {xray.XRAY_VERSION}")
+    raise SystemExit(0)
+if sys.argv[1:3] != ["run", "-test"] or sys.argv[3] != "-config":
+    raise SystemExit(97)
+with open(sys.argv[4], encoding="utf-8") as handle:
+    config = json.load(handle)
+streams = [item.get("streamSettings", {{}}) for group in ("inbounds", "outbounds")
+           for item in config.get(group, [])]
+raise SystemExit(23 if any(stream.get("network") == "tcp" for stream in streams) else 0)
+"""
+        deployment = self.deployment()
+
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory, "pinned-xray")
+            candidate.write_text(fixture_source, encoding="utf-8")
+            candidate.chmod(0o700)
+            metadata = xray.XrayBinaryMetadata(
+                "Xray-test.zip", hashlib.sha256(candidate.read_bytes()).hexdigest()
+            )
+
+            for stale_role in ("server", "client"):
+                with self.subTest(stale_role=stale_role):
+                    configs = {
+                        "server": build_server_config(deployment),
+                        "client": build_client_config(deployment),
+                    }
+                    stream_owner = "inbounds" if stale_role == "server" else "outbounds"
+                    configs[stale_role][stream_owner][0]["streamSettings"]["network"] = "tcp"
+
+                    with (
+                        mock.patch.object(xray, "_platform_key", return_value=self.PLATFORM),
+                        mock.patch.dict(
+                            xray.XRAY_BINARIES, {self.PLATFORM: metadata}, clear=True
+                        ),
+                        self.assertRaises(RuntimeError) as raised,
+                    ):
+                        xray.validate_configs(configs, binary=str(candidate))
+
+                    message = str(raised.exception)
+                    self.assertIn(f"{stale_role} Xray configuration", message)
+                    self.assertIn("invalid, unsupported, or stale", message)
+
     def test_unverified_requested_binary_is_never_run_or_replaced_by_system_xray(self) -> None:
         credential = "binary-private-material-4c821"  # credential-scan: allow
         with tempfile.TemporaryDirectory() as directory:
