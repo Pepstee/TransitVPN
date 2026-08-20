@@ -86,7 +86,15 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
     if not args.dry_run:
         _atomic_write(Path("state") / "xray-server.json", server_cfg)
         _atomic_write(Path("state") / "xray-client.json", client_cfg)
-        _atomic_write(Path("state") / "xray-identity.json", identity)
+        operator_identity = {
+            **identity,
+            "local_evidence": {
+                "scope": "configuration-validation",
+                "xray_configuration": "observed",
+            },
+            "external_recovery": {"status": "unprovisioned", "observed": False},
+        }
+        _atomic_write(Path("state") / "xray-identity.json", operator_identity)
         print("wrote permission-restricted server/client configs and binary identity to state/")
 
     return 0
