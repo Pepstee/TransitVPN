@@ -51,7 +51,7 @@ fi
 
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/transitvpn-certification.XXXXXX" </dev/null)
 cleanup() {
-    rm -rf -- "$temporary_root"
+    rm -rf -- "$temporary_root" </dev/null
 }
 trap cleanup EXIT HUP INT TERM
 
