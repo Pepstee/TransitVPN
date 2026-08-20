@@ -17,6 +17,90 @@ RUNNER = PROJECT_ROOT / "scripts" / "certify-clean.sh"
 
 
 class CleanCertificationRunnerTests(unittest.TestCase):
+    def run_instrumented_runner(
+        self, *, fail_install: bool = False, mutate_during_tests: bool = False
+    ) -> tuple[subprocess.CompletedProcess[str], list[str], Path]:
+        sandbox_context = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox_context.cleanup)
+        sandbox = Path(sandbox_context.name)
+        fake_bin = sandbox / "bin"
+        fake_bin.mkdir()
+        calls = sandbox / "calls"
+        created_root = sandbox / "created-root"
+        mutation_marker = sandbox / "pytest-mutated"
+
+        fake_python = fake_bin / "python3"
+        fake_python.write_text(
+            textwrap.dedent(
+                """\
+                #!/bin/sh
+                printf 'CALL' >> "$CERT_CALLS"
+                for arg in "$@"; do printf '|%s' "$arg" >> "$CERT_CALLS"; done
+                printf '|ACTIVE=%s|CONSTRAINT=%s|PYTHONPATH=%s|ADDOPTS=%s\\n' \\
+                    "${TRANSITVPN_CERTIFICATION_ACTIVE-}" "${PIP_CONSTRAINT-}" \\
+                    "${PYTHONPATH-}" "${PYTEST_ADDOPTS-}" >> "$CERT_CALLS"
+                if [ "$1" = -m ] && [ "$2" = venv ]; then
+                    mkdir -p "$3/bin"
+                    cp "$0" "$3/bin/python"
+                    printf '%s\\n' "$(dirname "$3")" > "$CERT_CREATED_ROOT"
+                elif [ "$1" = -m ] && [ "$2" = pip ] && [ "${CERT_FAIL_INSTALL-}" = 1 ]; then
+                    printf '%s\\n' \\
+                        'https://alice:super-secret@example.invalid/simple' \\
+                        'token=installation-secret' >&2
+                    exit 19
+                elif [ "$1" = -m ] && [ "$2" = pytest ] && \\
+                     [ "$3" != --collect-only ] && [ "${CERT_MUTATE-}" = 1 ]; then
+                    : > "$CERT_MUTATION_MARKER"
+                fi
+                exit 0
+                """
+            ),
+            encoding="utf-8",
+        )
+        fake_python.chmod(0o755)
+
+        fake_git = fake_bin / "git"
+        fake_git.write_text(
+            textwrap.dedent(
+                """\
+                #!/bin/sh
+                if [ -e "$CERT_MUTATION_MARKER" ]; then
+                    printf '%s\\n' 'tracked state changed during pytest'
+                fi
+                """
+            ),
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
+                "TMPDIR": str(sandbox),
+                "CERT_CALLS": str(calls),
+                "CERT_CREATED_ROOT": str(created_root),
+                "CERT_FAIL_INSTALL": "1" if fail_install else "0",
+                "CERT_MUTATE": "1" if mutate_during_tests else "0",
+                "CERT_MUTATION_MARKER": str(mutation_marker),
+                "TRANSITVPN_CERTIFICATION_ACTIVE": "1",
+                "PYTHONPATH": "/hostile/python/path",
+                "PYTEST_ADDOPTS": "--capture=no --maxfail=1",
+            }
+        )
+        completed = subprocess.run(
+            [str(RUNNER)],
+            cwd=sandbox,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        recorded = calls.read_text(encoding="utf-8").splitlines()
+        temporary_root = Path(created_root.read_text(encoding="utf-8").strip())
+        return completed, recorded, temporary_root
+
     def test_runner_has_an_executable_fail_fast_shell_contract(self) -> None:
         source = RUNNER.read_text(encoding="utf-8")
 
@@ -40,79 +124,66 @@ class CleanCertificationRunnerTests(unittest.TestCase):
                 self.assertIsNone(re.search(pattern, source))
         self.assertIn(">/dev/null 2>&1", source)
 
-    def test_execution_is_isolated_deterministic_and_cleans_up(self) -> None:
-        with tempfile.TemporaryDirectory() as sandbox_name:
-            sandbox = Path(sandbox_name)
-            fake_bin = sandbox / "bin"
-            fake_bin.mkdir()
-            calls = sandbox / "calls"
-            created_root = sandbox / "created-root"
-            fake_python = fake_bin / "python3"
-            fake_python.write_text(
-                textwrap.dedent(
-                    """\
-                    #!/bin/sh
-                    printf 'CALL' >> "$CERT_CALLS"
-                    for arg in "$@"; do printf '|%s' "$arg" >> "$CERT_CALLS"; done
-                    printf '|HASH=%s|PLUGINS=%s|ACTIVE=%s|PYTHONPATH=%s|ADDOPTS=%s\\n' \\
-                        "${PYTHONHASHSEED-}" "${PYTEST_DISABLE_PLUGIN_AUTOLOAD-}" \\
-                        "${TRANSITVPN_CERTIFICATION_ACTIVE-}" "${PYTHONPATH-}" \\
-                        "${PYTEST_ADDOPTS-}" >> "$CERT_CALLS"
-                    if [ "$1" = -m ] && [ "$2" = venv ]; then
-                        mkdir -p "$3/bin"
-                        cp "$0" "$3/bin/python"
-                        printf '%s\\n' "$(dirname "$3")" > "$CERT_CREATED_ROOT"
-                    fi
-                    exit 0
-                    """
-                ),
-                encoding="utf-8",
-            )
-            fake_python.chmod(0o755)
-            env = os.environ.copy()
-            env.update(
-                {
-                    "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
-                    "TMPDIR": str(sandbox),
-                    "CERT_CALLS": str(calls),
-                    "CERT_CREATED_ROOT": str(created_root),
-                    "PYTHONPATH": "/hostile/python/path",
-                    "PYTEST_ADDOPTS": "--capture=no --maxfail=1",
-                }
-            )
+    def test_public_active_flag_cannot_bypass_full_certification(self) -> None:
+        completed, recorded, temporary_root = self.run_instrumented_runner()
 
-            completed = subprocess.run(
-                [str(RUNNER)],
-                cwd=sandbox,
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertFalse(temporary_root.exists(), "EXIT trap left its temporary tree behind")
+        self.assertEqual([call.split("|ACTIVE=", 1)[0] for call in recorded], [
+            f"CALL|-m|venv|{temporary_root / 'venv'}",
+            f"CALL|-m|pip|install|--disable-pip-version-check|--quiet|{PROJECT_ROOT}[test]",
+            "CALL|-m|pytest|--collect-only|-q",
+            "CALL|-m|pytest|-q",
+        ])
+        self.assertTrue(all("|ACTIVE=1|" in call for call in recorded))
+        self.assertEqual(
+            completed.stdout.splitlines(),
+            [
+                "Collecting tests in clean environment...",
+                "Running tests in clean environment...",
+                "All acceptance checks passed.",
+            ],
+        )
 
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            temporary_root = Path(created_root.read_text(encoding="utf-8").strip())
-            self.assertFalse(temporary_root.exists(), "EXIT trap left its temporary tree behind")
+    def test_committed_constraint_is_used_and_contains_only_exact_pins(self) -> None:
+        completed, recorded, _ = self.run_instrumented_runner()
+        lock_file = PROJECT_ROOT / "requirements-certification.lock"
+        pins = [
+            line.strip()
+            for line in lock_file.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
 
-            recorded = calls.read_text(encoding="utf-8").splitlines()
-            common_env = "|HASH=0|PLUGINS=1|ACTIVE=1|PYTHONPATH=|ADDOPTS="
-            venv = temporary_root / "venv"
-            expected = [
-                f"CALL|-m|venv|{venv}{common_env}",
-                f"CALL|-m|pip|install|--disable-pip-version-check|--quiet|{PROJECT_ROOT}[test]{common_env}",
-                f"CALL|-m|pytest|--collect-only|-q{common_env}",
-                f"CALL|-m|pytest|-q{common_env}",
-            ]
-            self.assertEqual(recorded, expected)
-            self.assertEqual(
-                completed.stdout.splitlines(),
-                [
-                    "Collecting tests in clean environment...",
-                    "Running tests in clean environment...",
-                    "All acceptance checks passed.",
-                ],
-            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(pins, "certification lock must not be empty")
+        for pin in pins:
+            with self.subTest(pin=pin):
+                self.assertRegex(pin, r"^[A-Za-z0-9_.-]+==[^=<>!~;,\s]+$")
+        pip_call = next(call for call in recorded if "CALL|-m|pip|install|" in call)
+        self.assertIn(f"|CONSTRAINT={lock_file}|", pip_call)
+
+    def test_tracked_worktree_mutation_fails_but_unchanged_run_succeeds(self) -> None:
+        unchanged, _, _ = self.run_instrumented_runner()
+        mutated, _, _ = self.run_instrumented_runner(mutate_during_tests=True)
+
+        self.assertEqual(unchanged.returncode, 0, unchanged.stderr)
+        self.assertIn("All acceptance checks passed.", unchanged.stdout)
+        self.assertNotEqual(mutated.returncode, 0)
+        self.assertIn("pytest changed or staged tracked artifacts", mutated.stderr)
+        self.assertNotIn("All acceptance checks passed.", mutated.stdout + mutated.stderr)
+
+    def test_install_failure_is_credential_safe_and_never_claims_test_success(self) -> None:
+        completed, recorded, _ = self.run_instrumented_runner(fail_install=True)
+        diagnostics = completed.stdout + completed.stderr
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(len(recorded), 2, recorded)
+        self.assertIn("Certification project and dependency installation failed.", completed.stderr)
+        self.assertNotIn("super-secret", diagnostics)
+        self.assertNotIn("installation-secret", diagnostics)
+        self.assertNotIn("Collecting tests", diagnostics)
+        self.assertNotIn("Running tests", diagnostics)
+        self.assertNotIn("All acceptance checks passed.", diagnostics)
 
 
 if __name__ == "__main__":
