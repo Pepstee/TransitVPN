@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 from pathlib import Path
 import secrets
 import socket
@@ -139,9 +140,18 @@ def _wait_ready(process: subprocess.Popen[bytes], port: int, role: str, deadline
     raise XrayCertificationError(f"{role} Xray readiness check timed out")
 
 
-def _receive_exact(connection: socket.socket, count: int) -> bytes:
+def _set_remaining_timeout(connection: socket.socket, deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise XrayCertificationError("application-data tunnel probe timed out")
+    connection.settimeout(remaining)
+
+
+def _receive_exact(connection: socket.socket, count: int, deadline: float | None = None) -> bytes:
     data = bytearray()
     while len(data) < count:
+        if deadline is not None:
+            _set_remaining_timeout(connection, deadline)
         chunk = connection.recv(count - len(data))
         if not chunk:
             raise XrayCertificationError("SOCKS endpoint closed an incomplete response")
@@ -150,29 +160,32 @@ def _receive_exact(connection: socket.socket, count: int) -> bytes:
 
 
 def _probe(socks_port: int, upstream_port: int, expected_body: bytes, timeout: float) -> int:
+    deadline = time.monotonic() + timeout
     try:
         with socket.create_connection((_LOOPBACK, socks_port), timeout=timeout) as connection:
-            connection.settimeout(timeout)
+            _set_remaining_timeout(connection, deadline)
             connection.sendall(b"\x05\x01\x00")
-            if _receive_exact(connection, 2) != b"\x05\x00":
+            if _receive_exact(connection, 2, deadline) != b"\x05\x00":
                 raise XrayCertificationError("client SOCKS endpoint rejected no-auth negotiation")
 
             request = b"\x05\x01\x00\x01" + socket.inet_aton(_LOOPBACK)
             request += upstream_port.to_bytes(2, "big")
             connection.sendall(request)
-            reply = _receive_exact(connection, 4)
+            reply = _receive_exact(connection, 4, deadline)
             if reply[0] != 5 or reply[1] != 0:
                 raise XrayCertificationError("client SOCKS endpoint could not reach the responder")
             address_size = {1: 4, 4: 16}.get(reply[3])
             if reply[3] == 3:
-                address_size = _receive_exact(connection, 1)[0]
+                address_size = _receive_exact(connection, 1, deadline)[0]
             if address_size is None:
                 raise XrayCertificationError("client SOCKS endpoint returned an invalid address")
-            _receive_exact(connection, address_size + 2)
+            _receive_exact(connection, address_size + 2, deadline)
 
+            _set_remaining_timeout(connection, deadline)
             connection.sendall(b"GET /certify HTTP/1.0\r\nHost: local\r\n\r\n")
             response = bytearray()
             while True:
+                _set_remaining_timeout(connection, deadline)
                 chunk = connection.recv(4096)
                 if not chunk:
                     break
@@ -222,8 +235,8 @@ def certify_local_tunnel(
     All credentials and configuration files live in an automatically removed
     system temporary directory; child output is never written to disk.
     """
-    if timeout <= 0:
-        raise ValueError("timeout must be positive")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be positive and finite")
     try:
         executable, _ = verify_binary(xray_binary)
     except RuntimeError as exc:
