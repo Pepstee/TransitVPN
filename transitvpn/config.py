@@ -9,7 +9,7 @@ from transitvpn.keygen import Keys
 
 
 XRAY_VERSION = "26.7.11"
-_SHORT_ID = re.compile(r"^[0-9a-f]{2,16}$")
+_SHORT_ID = re.compile(r"^(?:[0-9a-f]{2}){1,8}$")
 
 
 @dataclass
@@ -115,6 +115,8 @@ class XrayDeployment:
         if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
             raise ValueError("target must be HOST:PORT")
         if not _SHORT_ID.fullmatch(self.short_id):
-            raise ValueError("short_id must be 2-16 lowercase hexadecimal characters")
+            raise ValueError(
+                "short_id must be 2-16 lowercase hexadecimal characters with even length"
+            )
         if not 0 < self.port < 65536 or not 0 < self.socks_port < 65536:
             raise ValueError("ports must be between 1 and 65535")
