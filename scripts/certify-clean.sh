@@ -10,7 +10,7 @@ script_directory=${script_path%/*}
 if [[ $script_directory == "$script_path" ]]; then
     script_directory=.
 fi
-project_root=$(cd -- "$script_directory/.." && pwd -P)
+project_root=$(cd -- "$script_directory/.." && pwd -P </dev/null)
 lock_file="$project_root/requirements-certification.lock"
 
 if [[ ! -r $lock_file ]]; then
@@ -69,7 +69,7 @@ export TRANSITVPN_CERTIFICATION_ACTIVE=1
 export PIP_CONSTRAINT=$lock_file
 
 venv="$temporary_root/venv"
-python3 -m venv "$venv"
+python3 -m venv "$venv" </dev/null
 
 # Keep installer output (which can echo authenticated index/proxy URLs) private.
 # Install only the committed, exactly pinned certification environment.  The
@@ -77,7 +77,7 @@ python3 -m venv "$venv"
 # installing the project or resolving its package metadata.
 if ! "$venv/bin/python" -m pip install \
     --disable-pip-version-check --no-input --quiet \
-    --requirement "$lock_file" >/dev/null 2>&1; then
+    --requirement "$lock_file" >/dev/null 2>&1 </dev/null; then
     printf '%s\n' \
         'Certification dependency installation failed.' \
         'Verify package-index access and requirements-certification.lock.' >&2
