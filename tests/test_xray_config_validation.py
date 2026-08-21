@@ -25,8 +25,10 @@ class PinnedConfigValidationTests(unittest.TestCase):
     def deployment() -> XrayDeployment:
         return XrayDeployment(
             keys=Keys(
+                # credential-scan: allow uuid-credential
                 vless_uuid="53b78d34-f35c-4d1d-b471-97f1f0783ec3",
-                reality_private_key="private-key-config-secret",  # credential-scan: allow
+                # credential-scan: allow password-token
+                reality_private_key="private-key-config-secret",
                 reality_public_key="public-key-value",
                 ss_password="unused-password-secret",  # credential-scan: allow password-token
             ),
@@ -130,7 +132,7 @@ raise SystemExit(23 if any(stream.get("network") == "tcp" for stream in streams)
                     self.assertIn("invalid, unsupported, or stale", message)
 
     def test_unverified_requested_binary_is_never_run_or_replaced_by_system_xray(self) -> None:
-        credential = "binary-private-material-4c821"  # credential-scan: allow
+        credential = "binary-private-material-4c821"  # credential-scan: allow password-token
         with tempfile.TemporaryDirectory() as directory:
             requested = Path(directory, "requested-xray")
             requested.write_bytes(credential.encode())

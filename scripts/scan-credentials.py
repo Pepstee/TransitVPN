@@ -45,7 +45,7 @@ UUID = re.compile(
 IMPORT_URI = re.compile(
     # credential-scan: allow client-import-uri
     r"\b(?:vless://[0-9a-f-]{36}@[^\s'\"<>]+|ss://[^\s'\"<>]{12,}"
-    r"|wg://[^\s'\"<>]+)",
+    r"|wg://[^\s'\"<>]+)",  # credential-scan: allow client-import-uri
     re.I,
 )
 NAMED_SECRET = re.compile(
