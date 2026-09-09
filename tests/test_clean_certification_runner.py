@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -18,7 +19,8 @@ RUNNER = PROJECT_ROOT / "scripts" / "certify-clean.sh"
 
 class CleanCertificationRunnerTests(unittest.TestCase):
     def run_instrumented_runner(
-        self, *, fail_install: bool = False, mutate_during_tests: bool = False
+        self, *, fail_install: bool = False, mutate_during_tests: bool = False,
+        probe_cli: bool = False
     ) -> tuple[subprocess.CompletedProcess[str], list[str], Path]:
         sandbox_context = tempfile.TemporaryDirectory()
         self.addCleanup(sandbox_context.cleanup)
@@ -52,6 +54,10 @@ class CleanCertificationRunnerTests(unittest.TestCase):
                      [ "$3" != --collect-only ] && [ "${CERT_MUTATE-}" = 1 ]; then
                     : > "$CERT_MUTATION_MARKER"
                 fi
+                if [ "$1" = -m ] && [ "$2" = pytest ] && [ "${CERT_PROBE_CLI-}" = 1 ]; then
+                    cd "$CERT_EXTERNAL_CWD" || exit 1
+                    "$CERT_REAL_PYTHON" -m transitvpn --version || exit $?
+                fi
                 exit 0
                 """
             ),
@@ -74,6 +80,8 @@ class CleanCertificationRunnerTests(unittest.TestCase):
         fake_git.chmod(0o755)
 
         env = os.environ.copy()
+        env.pop("__TRANSITVPN_CERTIFICATION_GUARD", None)
+        env.pop("__TRANSITVPN_CERTIFICATION_TOKEN", None)
         env.update(
             {
                 "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
@@ -81,6 +89,9 @@ class CleanCertificationRunnerTests(unittest.TestCase):
                 "CERT_CALLS": str(calls),
                 "CERT_CREATED_ROOT": str(created_root),
                 "CERT_FAIL_INSTALL": "1" if fail_install else "0",
+                "CERT_PROBE_CLI": "1" if probe_cli else "0",
+                "CERT_EXTERNAL_CWD": str(sandbox),
+                "CERT_REAL_PYTHON": sys.executable,
                 "CERT_MUTATE": "1" if mutate_during_tests else "0",
                 "CERT_MUTATION_MARKER": str(mutation_marker),
                 "TRANSITVPN_CERTIFICATION_ACTIVE": "1",
@@ -134,13 +145,14 @@ class CleanCertificationRunnerTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertFalse(temporary_root.exists(), "EXIT trap left its temporary tree behind")
         self.assertEqual([call.split("|ACTIVE=", 1)[0] for call in recorded], [
+            f"CALL|{PROJECT_ROOT / 'scripts/scan-credentials.py'}",
             f"CALL|-m|venv|{temporary_root / 'venv'}",
             "CALL|-m|pip|install|--disable-pip-version-check|--no-input|--quiet|"
             f"--requirement|{PROJECT_ROOT / 'requirements-certification.lock'}",
             "CALL|-m|pytest|--collect-only|-q|tests",
             "CALL|-m|pytest|-q|tests",
         ])
-        self.assertTrue(all("|ACTIVE=1|" in call for call in recorded))
+        self.assertTrue(all("|ACTIVE=1|" in call for call in recorded[1:]))
         self.assertEqual(
             completed.stdout.splitlines(),
             [
@@ -149,6 +161,20 @@ class CleanCertificationRunnerTests(unittest.TestCase):
                 "All acceptance checks passed.",
             ],
         )
+
+    def test_source_path_is_replaced_only_after_dependency_installation(self) -> None:
+        completed, recorded, _ = self.run_instrumented_runner()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        for call in recorded:
+            if "CALL|-m|pytest|" in call:
+                self.assertIn(f"|PYTHONPATH={PROJECT_ROOT}|", call)
+            elif "CALL|-m|" in call:
+                self.assertIn("|PYTHONPATH=|", call)
+
+    def test_child_cli_imports_from_external_working_directory(self) -> None:
+        completed, _, _ = self.run_instrumented_runner(probe_cli=True)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("0.1.0", completed.stdout)
 
     def test_committed_constraint_is_used_and_contains_only_exact_pins(self) -> None:
         completed, recorded, _ = self.run_instrumented_runner()
@@ -182,7 +208,7 @@ class CleanCertificationRunnerTests(unittest.TestCase):
         diagnostics = completed.stdout + completed.stderr
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertEqual(len(recorded), 2, recorded)
+        self.assertEqual(len(recorded), 3, recorded)
         self.assertIn("Certification dependency installation failed.", completed.stderr)
         self.assertNotIn("super-secret", diagnostics)
         self.assertNotIn("installation-secret", diagnostics)

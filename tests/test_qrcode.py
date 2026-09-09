@@ -12,13 +12,37 @@ from transitvpn.keygen import Keys, generate_keys
 from transitvpn.qrcode import (
     DEFAULT_FINGERPRINT,
     DEFAULT_FLOW,
-    DEFAULT_SNI,
     DEFAULT_SS_METHOD,
     make_ss_uri,
     make_vless_uri,
     render_qr,
     write_qr_png,
 )
+
+_SNI = "verified-target.example"
+_SHORT_ID = "a1b2c3d4"
+
+
+def _verified_vless_uri(keys: Keys, host: str, port: int, **overrides) -> str:
+    """Supply explicit synthetic REALITY inputs for URI/QR format tests."""
+    inputs = dict(sni=_SNI, short_id=_SHORT_ID)
+    inputs.update(overrides)
+    return make_vless_uri(keys, host, port, **inputs)
+
+
+class TestVlessRequiredParameters:
+    @pytest.mark.parametrize("inputs", [{}, {"sni": _SNI}, {"short_id": _SHORT_ID}])
+    def test_missing_parameters_are_rejected(self, keys, inputs):
+        with pytest.raises(TypeError):
+            make_vless_uri(keys, "vpn.example", 443, **inputs)
+
+    @pytest.mark.parametrize("inputs", [
+        {"sni": "", "short_id": _SHORT_ID}, {"sni": _SNI, "short_id": ""},
+    ])
+    def test_empty_parameters_are_rejected(self, keys, inputs):
+        with pytest.raises(ValueError):
+            make_vless_uri(keys, "vpn.example", 443, **inputs)
+
 
 # The share URI must use the same cipher the server config uses.
 _SS_METHOD = DEFAULT_SS_METHOD
@@ -31,7 +55,7 @@ def keys() -> Keys:
 
 @pytest.fixture()
 def vless_uri(keys: Keys) -> str:
-    return make_vless_uri(keys, "1.2.3.4", 443)
+    return _verified_vless_uri(keys, "1.2.3.4", 443)
 
 
 @pytest.fixture()
@@ -58,7 +82,7 @@ class TestVlessUriScheme:
         assert urlparse(vless_uri).scheme == "vless"
 
     def test_returns_string(self, keys: Keys) -> None:
-        assert isinstance(make_vless_uri(keys, "1.2.3.4", 443), str)
+        assert isinstance(_verified_vless_uri(keys, "1.2.3.4", 443), str)
 
     def test_at_separator_present(self, vless_uri: str) -> None:
         assert "@" in vless_uri
@@ -91,23 +115,23 @@ class TestVlessUriAuthority:
         assert str(parsed) == keys.vless_uuid
 
     def test_custom_host_is_reflected(self, keys: Keys) -> None:
-        uri = make_vless_uri(keys, "5.6.7.8", 443)
+        uri = _verified_vless_uri(keys, "5.6.7.8", 443)
         assert urlparse(uri).hostname == "5.6.7.8"
 
     def test_custom_port_is_reflected(self, keys: Keys) -> None:
-        uri = make_vless_uri(keys, "1.2.3.4", 8443)
+        uri = _verified_vless_uri(keys, "1.2.3.4", 8443)
         assert urlparse(uri).port == 8443
 
     def test_port_80_reflected(self, keys: Keys) -> None:
-        uri = make_vless_uri(keys, "1.2.3.4", 80)
+        uri = _verified_vless_uri(keys, "1.2.3.4", 80)
         assert urlparse(uri).port == 80
 
     def test_port_65535_reflected(self, keys: Keys) -> None:
-        uri = make_vless_uri(keys, "1.2.3.4", 65535)
+        uri = _verified_vless_uri(keys, "1.2.3.4", 65535)
         assert urlparse(uri).port == 65535
 
     def test_fallback_host_zero_dot_zero(self, keys: Keys) -> None:
-        uri = make_vless_uri(keys, "0.0.0.0", 443)
+        uri = _verified_vless_uri(keys, "0.0.0.0", 443)
         assert urlparse(uri).hostname == "0.0.0.0"
 
 
@@ -139,12 +163,12 @@ class TestVlessUriQueryParams:
 
     def test_all_required_params_present(self, vless_uri: str) -> None:
         params = parse_qs(urlparse(vless_uri).query)
-        required = {"security", "pbk", "encryption", "type", "sni", "fp", "flow"}
+        required = {"security", "pbk", "encryption", "type", "sni", "sid", "fp", "flow"}
         assert required.issubset(params.keys())
 
-    def test_sni_default_matches_server(self, vless_uri: str) -> None:
+    def test_explicit_sni_matches_server(self, vless_uri: str) -> None:
         params = parse_qs(urlparse(vless_uri).query)
-        assert params["sni"] == [DEFAULT_SNI]
+        assert params["sni"] == [_SNI]
 
     def test_fingerprint_present(self, vless_uri: str) -> None:
         params = parse_qs(urlparse(vless_uri).query)
@@ -155,12 +179,12 @@ class TestVlessUriQueryParams:
         assert params["flow"] == [DEFAULT_FLOW]
 
     def test_short_id_override_reflected(self, keys: Keys) -> None:
-        uri = make_vless_uri(keys, "1.2.3.4", 443, short_id="a1b2")
+        uri = _verified_vless_uri(keys, "1.2.3.4", 443, short_id="a1b2")
         params = parse_qs(urlparse(uri).query)
         assert params["sid"] == ["a1b2"]
 
     def test_sni_override_reflected(self, keys: Keys) -> None:
-        uri = make_vless_uri(keys, "1.2.3.4", 443, sni="vpn.example.com")
+        uri = _verified_vless_uri(keys, "1.2.3.4", 443, sni="vpn.example.com")
         params = parse_qs(urlparse(uri).query)
         assert params["sni"] == ["vpn.example.com"]
 
@@ -182,23 +206,23 @@ class TestVlessUriQueryParams:
 class TestVlessUriIndependence:
     def test_different_keys_produce_different_uri(self) -> None:
         k1, k2 = generate_keys(), generate_keys()
-        assert make_vless_uri(k1, "1.2.3.4", 443) != make_vless_uri(k2, "1.2.3.4", 443)
+        assert _verified_vless_uri(k1, "1.2.3.4", 443) != _verified_vless_uri(k2, "1.2.3.4", 443)
 
     def test_different_host_produces_different_uri(self, keys: Keys) -> None:
-        assert make_vless_uri(keys, "1.1.1.1", 443) != make_vless_uri(keys, "8.8.8.8", 443)
+        assert _verified_vless_uri(keys, "1.1.1.1", 443) != _verified_vless_uri(keys, "8.8.8.8", 443)
 
     def test_different_port_produces_different_uri(self, keys: Keys) -> None:
-        assert make_vless_uri(keys, "1.2.3.4", 443) != make_vless_uri(keys, "1.2.3.4", 8443)
+        assert _verified_vless_uri(keys, "1.2.3.4", 443) != _verified_vless_uri(keys, "1.2.3.4", 8443)
 
     def test_same_keys_host_port_produces_identical_uri(self, keys: Keys) -> None:
-        u1 = make_vless_uri(keys, "1.2.3.4", 443)
-        u2 = make_vless_uri(keys, "1.2.3.4", 443)
+        u1 = _verified_vless_uri(keys, "1.2.3.4", 443)
+        u2 = _verified_vless_uri(keys, "1.2.3.4", 443)
         assert u1 == u2
 
     def test_different_keys_different_pbk_in_uri(self) -> None:
         k1, k2 = generate_keys(), generate_keys()
-        p1 = parse_qs(urlparse(make_vless_uri(k1, "x", 1)).query)["pbk"][0]
-        p2 = parse_qs(urlparse(make_vless_uri(k2, "x", 1)).query)["pbk"][0]
+        p1 = parse_qs(urlparse(_verified_vless_uri(k1, "x", 1)).query)["pbk"][0]
+        p2 = parse_qs(urlparse(_verified_vless_uri(k2, "x", 1)).query)["pbk"][0]
         assert p1 != p2
 
 
@@ -332,7 +356,7 @@ class TestSsUriIndependence:
 
 class TestVlessVsSsIndependence:
     def test_vless_and_ss_have_different_schemes(self, keys: Keys) -> None:
-        vless = make_vless_uri(keys, "1.2.3.4", 443)
+        vless = _verified_vless_uri(keys, "1.2.3.4", 443)
         ss = make_ss_uri(keys, "1.2.3.4", 8388)
         assert urlparse(vless).scheme != urlparse(ss).scheme
 
@@ -362,16 +386,17 @@ class TestVlessVsSsIndependence:
 
 
 class TestUriMatchesServerConfig:
-    """A bootstrap run emits a server config and a client URI together; the
-    connection only works if their parameters agree. These guard that contract.
-    """
+    """Explicit matching deployment inputs must agree in server config and URI."""
 
     def test_vless_pbk_pairs_with_server_private_key(self, keys: Keys) -> None:
         from transitvpn.server import build_xray_config
 
-        xray = build_xray_config(keys)
+        xray = build_xray_config(
+            keys, target=f"{_SNI}:443", server_name=_SNI,
+            short_id=_SHORT_ID, target_verified=True,
+        )
         reality = xray["inbounds"][0]["streamSettings"]["realitySettings"]
-        params = parse_qs(urlparse(make_vless_uri(keys, "1.2.3.4", 443)).query)
+        params = parse_qs(urlparse(_verified_vless_uri(keys, "1.2.3.4", 443)).query)
         # Client carries the public key; server holds the matching private key.
         assert params["pbk"] == [keys.reality_public_key]
         assert reality["privateKey"] == keys.reality_private_key
@@ -379,18 +404,35 @@ class TestUriMatchesServerConfig:
     def test_vless_flow_matches_server(self, keys: Keys) -> None:
         from transitvpn.server import build_xray_config
 
-        xray = build_xray_config(keys)
+        xray = build_xray_config(
+            keys, target=f"{_SNI}:443", server_name=_SNI,
+            short_id=_SHORT_ID, target_verified=True,
+        )
         server_flow = xray["inbounds"][0]["settings"]["clients"][0]["flow"]
-        params = parse_qs(urlparse(make_vless_uri(keys, "1.2.3.4", 443)).query)
+        params = parse_qs(urlparse(_verified_vless_uri(keys, "1.2.3.4", 443)).query)
         assert params["flow"] == [server_flow]
 
     def test_vless_sni_matches_server_servernames(self, keys: Keys) -> None:
         from transitvpn.server import build_xray_config
 
-        xray = build_xray_config(keys)
+        xray = build_xray_config(
+            keys, target=f"{_SNI}:443", server_name=_SNI,
+            short_id=_SHORT_ID, target_verified=True,
+        )
         server_names = xray["inbounds"][0]["streamSettings"]["realitySettings"]["serverNames"]
-        params = parse_qs(urlparse(make_vless_uri(keys, "1.2.3.4", 443)).query)
+        params = parse_qs(urlparse(_verified_vless_uri(keys, "1.2.3.4", 443)).query)
         assert params["sni"][0] in server_names
+
+    def test_vless_short_id_matches_server(self, keys: Keys) -> None:
+        from transitvpn.server import build_xray_config
+
+        xray = build_xray_config(
+            keys, target=f"{_SNI}:443", server_name=_SNI,
+            short_id=_SHORT_ID, target_verified=True,
+        )
+        reality = xray["inbounds"][0]["streamSettings"]["realitySettings"]
+        params = parse_qs(urlparse(_verified_vless_uri(keys, "1.2.3.4", 443)).query)
+        assert params["sid"] == reality["shortIds"]
 
     def test_ss_method_matches_server(self, keys: Keys) -> None:
         from transitvpn.server import build_ss_config
@@ -421,7 +463,7 @@ class TestRenderQr:
     def test_render_encodes_the_uri(self, vless_uri: str) -> None:
         # The rendered output must be the QR for exactly this URI: rendering a
         # different URI must change the drawn matrix.
-        other = make_vless_uri(generate_keys(), "9.9.9.9", 443)
+        other = _verified_vless_uri(generate_keys(), "9.9.9.9", 443)
         assert render_qr(vless_uri) != render_qr(other)
 
     def test_render_is_deterministic(self, vless_uri: str) -> None:

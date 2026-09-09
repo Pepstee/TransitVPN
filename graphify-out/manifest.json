@@ -1,0 +1,197 @@
+{
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/scripts/acceptance_demo.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "54f7f0d19d3a549fb6aad3a8c3c1a930",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/scripts/scan-credentials.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "3de17adb5f1ba3fee55336d8d3a7e68d",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/__init__.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_acceptance.py": {
+    "mtime": 1788940361.5441756,
+    "ast_hash": "ece1e37d569e48cd1b0fd01671c57d8f",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_acceptance_declaration_contract.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "ab98e8801fd9ad3115e5364d3c06f933",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_acceptance_demo_budget_isolation.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "635e0ff2e9e0eb7f15a73ceac355e495",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_acceptance_offline.py": {
+    "mtime": 1788940327.26246,
+    "ast_hash": "f030e8f7723a36a7320a4494c4a79766",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_acceptance_one_tool_stdin.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "8a82daa1ef81c4a0bfb11d421f0b409e",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_bootstrap.py": {
+    "mtime": 1788940280.829693,
+    "ast_hash": "8eb53568b42463558c6817c84bb1d5e5",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_certification_budget_stdin_isolation.py": {
+    "mtime": 1788940229.3138251,
+    "ast_hash": "f3222981fe4d1b3b9ed0a56408885f38",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_certification_install_boundary.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "ef461f7efd9fcce5b876dee29e58c6a2",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_certification_noninteractive.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "e47b573e85a6730dd4e049d832db4918",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_cgnat.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "0418f5512cbec67ae801119d1a594166",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_clean_certification_credential_gate.py": {
+    "mtime": 1788940229.3135982,
+    "ast_hash": "a6035406264672906cb6d603654e6848",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_clean_certification_runner.py": {
+    "mtime": 1788940279.2784884,
+    "ast_hash": "6d349ce54ea5a6430cc5d0a769148533",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_config.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "fcdd24ea800941861f8ec22cf886d908",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_credential_boundary_scanner.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "b954d9da0dfda00bd1d36a27603f171e",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_development_dependencies.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "532fd1044c6e94e6d33be633a2808b11",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_keygen.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "8aa26e7e2cc042c828d5a2fbdca22685",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_qrcode.py": {
+    "mtime": 1788940009.006738,
+    "ast_hash": "1839c9d38d2fb1c45842c025f26048ea",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_reality_short_id_validation.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "427976ef1c2a0e3ea1b2e491a5167c75",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_server.py": {
+    "mtime": 1788939981.4767406,
+    "ast_hash": "c6537249cf1011935d77bb8a376d346c",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_subcommands_down_status.py": {
+    "mtime": 1788941021.454428,
+    "ast_hash": "9e2e235405e2796095e11c2688a8f25b",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_tunnel_lifecycle.py": {
+    "mtime": 1788941155.311611,
+    "ast_hash": "3da9c6309e5fa111080446be8ebb4bb1",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_xray_certification_failure_paths.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "4eac379132448c788852e8ddc44f0f0e",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_xray_config_validation.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "9b0bf82fa3205bd03fdaee61d521899b",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_xray_local_tunnel_certification.py": {
+    "mtime": 1788940910.3943393,
+    "ast_hash": "953465d230366390d4929788cdc7195a",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/tests/test_xray_pinning.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "ba7263e83267553a9e6b2bc29637978f",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/transitvpn/__init__.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "dbce9dab3df46999bea5dd3005cc3009",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/transitvpn/__main__.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "6c23057112dce8f473a1cb102de0555b",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/transitvpn/cgnat.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "7e5f93baf423bd8706dfe4a572deb18c",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/transitvpn/cli.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "aefce7581f4a45ab71995690c0d71d97",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/transitvpn/config.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "71bef24ca2442efd06b2bc1419a48493",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/transitvpn/keygen.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "e3e45e4de4086f5be13551d45cbc4c60",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/transitvpn/qrcode.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "206a78de3eba734128a55f615bdd9c45",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/transitvpn/server.py": {
+    "mtime": 1788939954.207444,
+    "ast_hash": "7a0988900919b0a21689617725454924",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/transitvpn/tunnel.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "c5753e9f5fdbcd3aec858f9313ceca3c",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/transitvpn/xray.py": {
+    "mtime": 1787280490.0,
+    "ast_hash": "fdece199030f3d6b190621e6511efad0",
+    "semantic_hash": ""
+  },
+  "/Users/admin/Documents/ox-alpha-giga-workspace/projects/transitvpn/transitvpn/xray_certification.py": {
+    "mtime": 1788940896.4126494,
+    "ast_hash": "c9e121c8d2343d37081226366ac327ca",
+    "semantic_hash": ""
+  }
+}

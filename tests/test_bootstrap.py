@@ -1,145 +1,123 @@
-"""Tests for the bootstrap CLI command — state/ file assertions, cgnat mocked, hermetic."""
+"""Hermetic bootstrap contract tests with a controlled binary-validation boundary.
 
+Real pinned-binary validation and tunnel operation have separate integration tests.
+These exercise the actual CLI, generation and permission-restricted persistence.
+"""
 from __future__ import annotations
 
 import json
+import stat
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from transitvpn.cgnat import CgnatResult, CgnatStatus
 from transitvpn.cli import main
+from transitvpn.xray import XRAY_VERSION
 
 
-# ---------------------------------------------------------------------------
-# Helpers — pre-built CgnatResult stubs
-# ---------------------------------------------------------------------------
-
-
-def _cgnat_ok(public_ip: str = "1.2.3.4") -> CgnatResult:
-    return CgnatResult(
-        status=CgnatStatus.NOT_BEHIND_CGNAT,
-        public_ip=public_ip,
-        local_ip="192.168.1.1",
-        upnp_available=False,
-        details=["local IP: 192.168.1.1", f"public IP: {public_ip}"],
-    )
-
-
-def _cgnat_behind() -> CgnatResult:
-    return CgnatResult(
-        status=CgnatStatus.BEHIND_CGNAT,
-        public_ip="100.100.0.1",
-        local_ip="192.168.1.1",
-        upnp_available=False,
-        details=["local IP: 192.168.1.1", "public IP: 100.100.0.1",
-                 "public IP is non-routable → double-NAT / CGNAT"],
-    )
-
-
-def _cgnat_unknown() -> CgnatResult:
-    return CgnatResult(
-        status=CgnatStatus.UNKNOWN,
-        public_ip=None,
-        local_ip=None,
-        upnp_available=False,
-        details=["dry-run: network probes skipped"],
-    )
-
-
-# ---------------------------------------------------------------------------
-# Fixture — bootstrap runner with chdir + mocked detect_cgnat
-# ---------------------------------------------------------------------------
+_ARGUMENTS = [
+    "--host", "vpn.example", "--target", "verified-target.example:443",
+    "--server-name", "verified-target.example", "--target-verified",
+    "--xray-binary", "synthetic-test-xray",
+]
+_IDENTITY = {"version": XRAY_VERSION, "sha256": "0" * 64,
+             "checksum_source": "https://example.invalid/synthetic-test.dgst"}
+_FILES = ("xray-server.json", "xray-client.json", "xray-identity.json")
 
 
 @pytest.fixture()
 def run_in_tmp(tmp_path, monkeypatch, capsys):
-    """
-    Returns a helper that runs `main(argv)` with detect_cgnat mocked and
-    cwd set to tmp_path. Returns (exit_code, captured_stdout).
-    """
     monkeypatch.chdir(tmp_path)
 
-    def _run(argv=None, cgnat_result=None):
-        if cgnat_result is None:
-            cgnat_result = _cgnat_ok()
-        with patch("transitvpn.cgnat.detect_cgnat", return_value=cgnat_result):
-            code = main(argv if argv is not None else ["bootstrap"])
-        out = capsys.readouterr().out
-        return code, out
+    def run(argv=None, *, failure=None):
+        arguments = list(argv if argv is not None else ["bootstrap"])
+        with patch("transitvpn.xray.validate_configs", return_value=dict(_IDENTITY),
+                   side_effect=failure) as validation:
+            code = main(arguments + _ARGUMENTS)
+        captured = capsys.readouterr()
+        run.observed = SimpleNamespace(validation=validation, stdout=captured.out,
+                                       stderr=captured.err)
+        return code, captured.out
 
-    return _run
+    return run
 
 
-# ---------------------------------------------------------------------------
-# Return-code
-# ---------------------------------------------------------------------------
+def read_state(tmp_path, name):
+    return json.loads((tmp_path / "state" / name).read_text())
+
+
+class TestBootstrapRequiredArguments:
+    @pytest.mark.parametrize("option", ["--host", "--target", "--server-name",
+                                        "--target-verified"])
+    def test_missing_required_argument_is_rejected(self, tmp_path, monkeypatch, option):
+        monkeypatch.chdir(tmp_path)
+        arguments = list(_ARGUMENTS)
+        index = arguments.index(option)
+        del arguments[index:index + (1 if option == "--target-verified" else 2)]
+        with pytest.raises(SystemExit) as raised:
+            main(["bootstrap", *arguments])
+        assert raised.value.code == 2
+        assert not (tmp_path / "state").exists()
+
+    def test_no_implicit_host_or_target(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit) as raised:
+            main(["bootstrap"])
+        assert raised.value.code == 2
+        assert not (tmp_path / "state").exists()
 
 
 class TestBootstrapReturnCode:
-    def test_dry_run_returns_zero(self, run_in_tmp) -> None:
-        code, _ = run_in_tmp(["bootstrap", "--dry-run"], cgnat_result=_cgnat_unknown())
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_validated_run_returns_zero(self, run_in_tmp, dry_run):
+        code, _ = run_in_tmp(["bootstrap"] + (["--dry-run"] if dry_run else []))
         assert code == 0
 
-    def test_normal_run_returns_zero(self, run_in_tmp) -> None:
-        code, _ = run_in_tmp(["bootstrap"])
-        assert code == 0
-
-    def test_returns_zero_when_behind_cgnat(self, run_in_tmp) -> None:
-        code, _ = run_in_tmp(["bootstrap"], cgnat_result=_cgnat_behind())
-        assert code == 0
-
-    def test_returns_zero_when_public_ip_none(self, run_in_tmp) -> None:
-        code, _ = run_in_tmp(["bootstrap"], cgnat_result=_cgnat_unknown())
-        assert code == 0
-
-
-# ---------------------------------------------------------------------------
-# State file creation — normal run writes both files
-# ---------------------------------------------------------------------------
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_validation_failure_is_closed(self, run_in_tmp, tmp_path, dry_run):
+        code, out = run_in_tmp(["bootstrap"] + (["--dry-run"] if dry_run else []),
+                               failure=RuntimeError("pinned binary unavailable"))
+        assert code == 1
+        assert "pinned binary unavailable" in run_in_tmp.observed.stderr
+        assert "validated" not in out and "wrote" not in out
+        assert not (tmp_path / "state").exists()
 
 
 class TestBootstrapFileCreation:
-    def test_xray_server_json_created(self, run_in_tmp, tmp_path) -> None:
-        run_in_tmp(["bootstrap"])
-        assert (tmp_path / "state" / "xray-server.json").exists()
+    @pytest.mark.parametrize("name", _FILES)
+    def test_generated_file_is_valid_json(self, run_in_tmp, tmp_path, name):
+        run_in_tmp()
+        assert isinstance(read_state(tmp_path, name), dict)
 
-    def test_ss_server_json_created(self, run_in_tmp, tmp_path) -> None:
-        run_in_tmp(["bootstrap"])
-        assert (tmp_path / "state" / "ss-server.json").exists()
+    @pytest.mark.parametrize("name", _FILES)
+    def test_dry_run_does_not_write_files(self, run_in_tmp, tmp_path, name):
+        run_in_tmp(["bootstrap", "--dry-run"])
+        assert not (tmp_path / "state" / name).exists()
 
-    def test_state_dir_created(self, run_in_tmp, tmp_path) -> None:
-        run_in_tmp(["bootstrap"])
-        assert (tmp_path / "state").is_dir()
+    def test_exact_generated_files(self, run_in_tmp, tmp_path):
+        run_in_tmp()
+        assert {p.name for p in (tmp_path / "state").iterdir()} == set(_FILES)
 
-    def test_dry_run_does_not_create_xray_file(self, run_in_tmp, tmp_path) -> None:
-        run_in_tmp(["bootstrap", "--dry-run"], cgnat_result=_cgnat_unknown())
-        assert not (tmp_path / "state" / "xray-server.json").exists()
-
-    def test_dry_run_does_not_create_ss_file(self, run_in_tmp, tmp_path) -> None:
-        run_in_tmp(["bootstrap", "--dry-run"], cgnat_result=_cgnat_unknown())
-        assert not (tmp_path / "state" / "ss-server.json").exists()
-
-    def test_dry_run_does_not_create_state_dir(self, run_in_tmp, tmp_path) -> None:
-        run_in_tmp(["bootstrap", "--dry-run"], cgnat_result=_cgnat_unknown())
+    def test_dry_run_does_not_create_state(self, run_in_tmp, tmp_path):
+        run_in_tmp(["bootstrap", "--dry-run"])
         assert not (tmp_path / "state").exists()
 
-    def test_xray_file_contains_valid_json(self, run_in_tmp, tmp_path) -> None:
-        run_in_tmp(["bootstrap"])
-        raw = (tmp_path / "state" / "xray-server.json").read_text()
-        parsed = json.loads(raw)
-        assert isinstance(parsed, dict)
+    @pytest.mark.parametrize("name", _FILES)
+    def test_files_are_owner_only(self, run_in_tmp, tmp_path, name):
+        run_in_tmp()
+        assert stat.S_IMODE((tmp_path / "state" / name).stat().st_mode) == 0o600
 
-    def test_ss_file_contains_valid_json(self, run_in_tmp, tmp_path) -> None:
-        run_in_tmp(["bootstrap"])
-        raw = (tmp_path / "state" / "ss-server.json").read_text()
-        parsed = json.loads(raw)
-        assert isinstance(parsed, dict)
+    def test_state_directory_is_owner_only(self, run_in_tmp, tmp_path):
+        run_in_tmp()
+        assert stat.S_IMODE((tmp_path / "state").stat().st_mode) == 0o700
 
-
-# ---------------------------------------------------------------------------
-# JSON structure of xray-server.json
-# ---------------------------------------------------------------------------
+    def test_existing_state_permissions_are_restricted(self, run_in_tmp, tmp_path):
+        state = tmp_path / "state"
+        state.mkdir(mode=0o755)
+        state.chmod(0o755)
+        run_in_tmp()
+        assert stat.S_IMODE(state.stat().st_mode) == 0o700
 
 
 class TestXrayJsonStructure:
@@ -192,223 +170,127 @@ class TestXrayJsonStructure:
         assert re_parsed == xray
 
 
-# ---------------------------------------------------------------------------
-# JSON structure of ss-server.json
-# ---------------------------------------------------------------------------
-
-
-class TestSsJsonStructure:
+class TestMatchedClientAndServer:
     @pytest.fixture()
-    def ss(self, run_in_tmp, tmp_path) -> dict:
-        run_in_tmp(["bootstrap"])
-        return json.loads((tmp_path / "state" / "ss-server.json").read_text())
+    def peers(self, run_in_tmp, tmp_path):
+        run_in_tmp()
+        return (read_state(tmp_path, "xray-server.json"),
+                read_state(tmp_path, "xray-client.json"))
 
-    def test_server_key_present(self, ss) -> None:
-        assert "server" in ss
+    def test_client_uses_explicit_host_and_server_port(self, peers):
+        server, client = peers
+        endpoint = client["outbounds"][0]["settings"]["vnext"][0]
+        assert endpoint["address"] == "vpn.example"
+        assert endpoint["port"] == server["inbounds"][0]["port"] == 443
 
-    def test_server_port_key_present(self, ss) -> None:
-        assert "server_port" in ss
+    def test_uuid_and_flow_match(self, peers):
+        server, client = peers
+        account = server["inbounds"][0]["settings"]["clients"][0]
+        user = client["outbounds"][0]["settings"]["vnext"][0]["users"][0]
+        assert user["id"] == account["id"]
+        assert user["flow"] == account["flow"] == "xtls-rprx-vision"
 
-    def test_password_key_present(self, ss) -> None:
-        assert "password" in ss
+    def test_sni_and_short_id_match(self, peers):
+        server, client = peers
+        reality = server["inbounds"][0]["streamSettings"]["realitySettings"]
+        remote = client["outbounds"][0]["streamSettings"]["realitySettings"]
+        assert reality["target"] == "verified-target.example:443"
+        assert reality["serverNames"] == [remote["serverName"]] == ["verified-target.example"]
+        assert reality["shortIds"] == [remote["shortId"]]
+        assert len(remote["shortId"]) == 16
+        assert int(remote["shortId"], 16) >= 0
 
-    def test_method_key_present(self, ss) -> None:
-        assert "method" in ss
+    def test_public_key_cryptographically_matches_private_key(self, peers):
+        import base64
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+        server, client = peers
+        reality = server["inbounds"][0]["streamSettings"]["realitySettings"]
+        remote = client["outbounds"][0]["streamSettings"]["realitySettings"]
+        raw = base64.urlsafe_b64decode(reality["privateKey"] + "=")
+        public = X25519PrivateKey.from_private_bytes(raw).public_key().public_bytes(
+            Encoding.Raw, PublicFormat.Raw)
+        assert base64.urlsafe_b64encode(public).decode().rstrip("=") == remote["publicKey"]
 
-    def test_mode_key_present(self, ss) -> None:
-        assert "mode" in ss
+    def test_client_has_loopback_socks_only(self, peers):
+        _, client = peers
+        assert len(client["inbounds"]) == 1
+        inbound = client["inbounds"][0]
+        assert inbound["protocol"] == "socks"
+        assert inbound["listen"] == "127.0.0.1"
+        assert inbound["port"] == 10808
 
-    def test_all_required_keys_present(self, ss) -> None:
-        assert {"server", "server_port", "password", "method", "mode"}.issubset(ss.keys())
+    def test_client_has_no_direct_fallback(self, peers):
+        _, client = peers
+        assert len(client["outbounds"]) == 1
+        assert client["outbounds"][0]["protocol"] == "vless"
 
-    def test_server_port_is_8388(self, ss) -> None:
-        assert ss["server_port"] == 8388
-
-    def test_server_port_is_int(self, ss) -> None:
-        assert isinstance(ss["server_port"], int)
-
-    def test_mode_is_tcp_and_udp(self, ss) -> None:
-        assert ss["mode"] == "tcp_and_udp"
-
-    def test_method_is_ss2022_cipher(self, ss) -> None:
-        assert ss["method"].startswith("2022-")
-
-    def test_password_is_non_empty_string(self, ss) -> None:
-        assert isinstance(ss["password"], str)
-        assert ss["password"] != ""
-
-    def test_json_roundtrip_preserves_identity(self, ss) -> None:
-        assert json.loads(json.dumps(ss)) == ss
-
-
-# ---------------------------------------------------------------------------
-# Stdout output — cgnat status line
-# ---------------------------------------------------------------------------
-
-
-class TestBootstrapStdoutCgnat:
-    def test_prints_cgnat_status_not_behind(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap"], cgnat_result=_cgnat_ok())
-        assert "cgnat: not_behind_cgnat" in out
-
-    def test_prints_cgnat_status_behind(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap"], cgnat_result=_cgnat_behind())
-        assert "cgnat: behind_cgnat" in out
-
-    def test_prints_cgnat_status_unknown_on_dry_run(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap", "--dry-run"], cgnat_result=_cgnat_unknown())
-        assert "cgnat: unknown" in out
-
-    def test_prints_cgnat_details(self, run_in_tmp) -> None:
-        cgnat = _cgnat_ok()
-        _, out = run_in_tmp(["bootstrap"], cgnat_result=cgnat)
-        for detail in cgnat.details:
-            assert detail in out
-
-    def test_no_cgnat_warning_when_not_behind(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap"], cgnat_result=_cgnat_ok())
-        assert "warning" not in out.lower() or "CGNAT" not in out
-
-    def test_cgnat_warning_printed_when_behind(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap"], cgnat_result=_cgnat_behind())
-        assert "warning" in out
-        assert "CGNAT" in out
-
-    def test_unknown_public_ip_dry_run_warns_user(self, run_in_tmp) -> None:
-        """When public_ip is None, dry-run output must contain 'warning' or 'unknown'.
-
-        No network is touched: detect_cgnat is mocked by run_in_tmp.  The 'cgnat: unknown'
-        status line and the 'warning: public IP unknown' line both satisfy the contract.
-        """
-        _, out = run_in_tmp(["bootstrap", "--dry-run"], cgnat_result=_cgnat_unknown())
-        lower = out.lower()
-        assert "warning" in lower or "unknown" in lower, (
-            f"expected 'warning' or 'unknown' in output, got:\n{out}"
-        )
+    @pytest.mark.parametrize("role", [0, 1])
+    def test_both_peers_use_reality_raw(self, peers, role):
+        section = "inbounds" if role == 0 else "outbounds"
+        stream = peers[role][section][0]["streamSettings"]
+        assert stream["network"] == "raw"
+        assert stream["security"] == "reality"
 
 
-# ---------------------------------------------------------------------------
-# Stdout output — URI lines
-# ---------------------------------------------------------------------------
+class TestBootstrapValidationAndIdentity:
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_both_configs_validated_with_explicit_binary(self, run_in_tmp, tmp_path, dry_run):
+        run_in_tmp(["bootstrap"] + (["--dry-run"] if dry_run else []))
+        validation = run_in_tmp.observed.validation
+        validation.assert_called_once()
+        configs, binary = validation.call_args.args
+        assert set(configs) == {"server", "client"}
+        assert binary == "synthetic-test-xray"
+        if not dry_run:
+            for role in configs:
+                assert read_state(tmp_path, f"xray-{role}.json") == configs[role]
+
+    def test_identity_records_only_observed_scope(self, run_in_tmp, tmp_path):
+        run_in_tmp()
+        identity = read_state(tmp_path, "xray-identity.json")
+        assert {key: identity[key] for key in _IDENTITY} == _IDENTITY
+        assert identity["local_evidence"] == {
+            "scope": "configuration-validation", "xray_configuration": "observed"}
+        assert identity["external_recovery"] == {"status": "unprovisioned", "observed": False}
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_no_network_discovery(self, run_in_tmp, dry_run):
+        with patch("transitvpn.cgnat.detect_cgnat") as discovery:
+            run_in_tmp(["bootstrap"] + (["--dry-run"] if dry_run else []))
+        discovery.assert_not_called()
 
 
-class TestBootstrapStdoutUris:
-    def test_prints_vless_uri_label(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap"])
-        assert "vless_uri:" in out
+class TestBootstrapOutputAndRotation:
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_stdout_contains_only_nonsecret_validation_evidence(self, run_in_tmp, dry_run):
+        _, out = run_in_tmp(["bootstrap"] + (["--dry-run"] if dry_run else []))
+        assert f"Xray {XRAY_VERSION}" in out
+        assert _IDENTITY["sha256"] in out
+        configs = run_in_tmp.observed.validation.call_args.args[0]
+        server = configs["server"]["inbounds"][0]
+        reality = server["streamSettings"]["realitySettings"]
+        for value in [server["settings"]["clients"][0]["id"], reality["privateKey"],
+                      reality["shortIds"][0]]:
+            assert value not in out + run_in_tmp.observed.stderr
+        assert "vless://" not in out and "ss://" not in out
+        assert ("wrote" in out) is not dry_run
 
-    def test_prints_ss_uri_label(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap"])
-        assert "ss_uri:" in out
-
-    def test_vless_uri_in_stdout_starts_with_scheme(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap"])
-        vless_line = next(ln for ln in out.splitlines() if "vless_uri:" in ln)
-        assert "vless://" in vless_line
-
-    def test_ss_uri_in_stdout_starts_with_scheme(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap"])
-        ss_line = next(ln for ln in out.splitlines() if "ss_uri:" in ln and "vless" not in ln)
-        assert "ss://" in ss_line
-
-    def test_vless_uri_uses_public_ip_from_cgnat(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap"], cgnat_result=_cgnat_ok("9.9.9.9"))
-        vless_line = next(ln for ln in out.splitlines() if "vless_uri:" in ln)
-        assert "9.9.9.9" in vless_line
-
-    def test_ss_uri_uses_public_ip_from_cgnat(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap"], cgnat_result=_cgnat_ok("9.9.9.9"))
-        ss_line = next(ln for ln in out.splitlines() if "ss_uri:" in ln and "vless" not in ln)
-        assert "9.9.9.9" in ss_line
-
-    def test_fallback_host_zero_when_public_ip_none(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap"], cgnat_result=_cgnat_unknown())
-        vless_line = next(ln for ln in out.splitlines() if "vless_uri:" in ln)
-        assert "0.0.0.0" in vless_line
-
-    def test_vless_uses_port_443(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap"])
-        vless_line = next(ln for ln in out.splitlines() if "vless_uri:" in ln)
-        assert ":443" in vless_line
-
-    def test_ss_uses_port_8388(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap"])
-        # "ss_uri:" is a substring of "vless_uri:"; guard against that.
-        ss_line = next(ln for ln in out.splitlines() if "ss_uri:" in ln and "vless" not in ln)
-        assert ":8388" in ss_line
-
-    def test_dry_run_also_prints_uris(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap", "--dry-run"], cgnat_result=_cgnat_unknown())
-        assert "vless_uri:" in out
-        assert "ss_uri:" in out
-
-
-# ---------------------------------------------------------------------------
-# Stdout output — "wrote files" message
-# ---------------------------------------------------------------------------
-
-
-class TestBootstrapWroteFilesMessage:
-    def test_normal_run_prints_wrote_message(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap"])
-        assert "wrote" in out and ("xray-server.json" in out or "state" in out)
-
-    def test_dry_run_does_not_print_wrote_message(self, run_in_tmp) -> None:
-        _, out = run_in_tmp(["bootstrap", "--dry-run"], cgnat_result=_cgnat_unknown())
-        assert "wrote" not in out
-
-
-# ---------------------------------------------------------------------------
-# detect_cgnat interaction
-# ---------------------------------------------------------------------------
-
-
-class TestBootstrapCgnatCallSite:
-    def test_detect_cgnat_called_with_dry_run_false_for_normal(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        monkeypatch.chdir(tmp_path)
-        with patch(
-            "transitvpn.cgnat.detect_cgnat", return_value=_cgnat_ok()
-        ) as mock_detect:
-            main(["bootstrap"])
-        mock_detect.assert_called_once_with(dry_run=False)
-
-    def test_detect_cgnat_called_with_dry_run_true(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        monkeypatch.chdir(tmp_path)
-        with patch(
-            "transitvpn.cgnat.detect_cgnat", return_value=_cgnat_unknown()
-        ) as mock_detect:
-            main(["bootstrap", "--dry-run"])
-        mock_detect.assert_called_once_with(dry_run=True)
-
-    def test_detect_cgnat_called_exactly_once(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.chdir(tmp_path)
-        with patch(
-            "transitvpn.cgnat.detect_cgnat", return_value=_cgnat_ok()
-        ) as mock_detect:
-            main(["bootstrap"])
-        assert mock_detect.call_count == 1
-
-
-# ---------------------------------------------------------------------------
-# Two successive normal runs — second overwrites first (idempotent)
-# ---------------------------------------------------------------------------
-
-
-class TestBootstrapIdempotency:
-    def test_second_run_overwrites_xray_json(self, run_in_tmp, tmp_path) -> None:
-        run_in_tmp(["bootstrap"])
-        content1 = (tmp_path / "state" / "xray-server.json").read_text()
-        run_in_tmp(["bootstrap"])
-        content2 = (tmp_path / "state" / "xray-server.json").read_text()
-        # Both must be valid JSON; passwords differ because generate_keys() randomises them
-        assert json.loads(content1) is not None
-        assert json.loads(content2) is not None
-
-    def test_second_run_returns_zero(self, run_in_tmp) -> None:
-        run_in_tmp(["bootstrap"])
-        code, _ = run_in_tmp(["bootstrap"])
+    def test_rotation_generates_new_credentials(self, run_in_tmp, tmp_path):
+        run_in_tmp()
+        first = read_state(tmp_path, "xray-server.json")["inbounds"][0]
+        code, _ = run_in_tmp()
+        second = read_state(tmp_path, "xray-server.json")["inbounds"][0]
         assert code == 0
+        assert first["settings"]["clients"][0]["id"] != second["settings"]["clients"][0]["id"]
+        for key in ("privateKey", "shortIds"):
+            assert first["streamSettings"]["realitySettings"][key] != second["streamSettings"]["realitySettings"][key]
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_nonwriting_attempt_preserves_previous_state(self, run_in_tmp, tmp_path, dry_run):
+        run_in_tmp()
+        before = {name: (tmp_path / "state" / name).read_bytes() for name in _FILES}
+        run_in_tmp(["bootstrap"] + (["--dry-run"] if dry_run else []),
+                   failure=None if dry_run else RuntimeError("validation rejected"))
+        after = {name: (tmp_path / "state" / name).read_bytes() for name in _FILES}
+        assert after == before

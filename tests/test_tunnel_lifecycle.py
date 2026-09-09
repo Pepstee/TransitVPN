@@ -1,11 +1,8 @@
-"""Real tunnel lifecycle tests using a long-lived fake process.
+"""Process lifecycle checks with an explicitly injected test executable.
 
-TRANSITVPN_PROXY_BIN is set to 'sys.executable -c import time; time.sleep(30)'
-to inject a process that lives long enough to exercise start/stop/status without
-requiring the xray binary.
-
-start_tunnel splits the env-var on whitespace (maxsplit=2) and appends
-'-config <path>', which the sleep script silently ignores.
+Only the binary-verification return value is replaced. The lifecycle and CLI
+still spawn, inspect and terminate real processes. These checks do not certify
+Xray trust or networking, which have separate pinned-binary tests.
 """
 
 from __future__ import annotations
@@ -20,9 +17,14 @@ from pathlib import Path
 
 import pytest
 
+from transitvpn import tunnel
 from transitvpn.tunnel import get_status, start_tunnel, stop_tunnel
 
-_FAKE_BIN = sys.executable + " -c " + "import time; time.sleep(30)"
+def _write_test_binary(path: Path, body: str = "exec sleep 30") -> str:
+    # Temporary executable has a distinct lifecycle: it exists only for this test.
+    path.write_text("#!/bin/sh\n" + body + "\n")
+    path.chmod(0o700)
+    return str(path)
 
 
 # ---------------------------------------------------------------------------
@@ -94,14 +96,20 @@ def _kill_for_cleanup(state_dir: str) -> None:
     pid_file.unlink(missing_ok=True)
 
 
-def _run_cli(cmd: str, workdir: Path, extra_env: dict) -> subprocess.CompletedProcess:
-    env = {**os.environ, **extra_env}
+def _run_cli(cmd: str, workdir: Path, proxy_binary: str) -> subprocess.CompletedProcess:
+    # Inject in the child interpreter, never through a production trust bypass.
+    harness = (
+        "import sys; import transitvpn.tunnel as tunnel; "
+        "tunnel.verify_binary = lambda binary: (sys.argv[1], None); "
+        "from transitvpn.cli import main; raise SystemExit(main(sys.argv[2:]))"
+    )
     return subprocess.run(
-        [sys.executable, "-m", "transitvpn", cmd],
+        [sys.executable, "-c", harness, proxy_binary, cmd],
         capture_output=True,
         text=True,
         cwd=str(workdir),
-        env=env,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+        timeout=15,
     )
 
 
@@ -111,8 +119,9 @@ def _run_cli(cmd: str, workdir: Path, extra_env: dict) -> subprocess.CompletedPr
 
 
 @pytest.fixture
-def fake_bin(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TRANSITVPN_PROXY_BIN", _FAKE_BIN)
+def fake_bin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    executable = _write_test_binary(tmp_path / "test-proxy")
+    monkeypatch.setattr(tunnel, "verify_binary", lambda binary: (executable, None))
 
 
 @pytest.fixture
@@ -137,8 +146,8 @@ def workdir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def proxy_env() -> dict:
-    return {"TRANSITVPN_PROXY_BIN": _FAKE_BIN}
+def proxy_binary(tmp_path: Path) -> str:
+    return _write_test_binary(tmp_path / "cli-test-proxy")
 
 
 # ---------------------------------------------------------------------------
@@ -228,20 +237,48 @@ class TestStartTunnel:
     def test_nonexistent_binary_returns_none_and_error(
         self, monkeypatch: pytest.MonkeyPatch, config_file: str, state_dir: str
     ) -> None:
-        monkeypatch.setenv("TRANSITVPN_PROXY_BIN", "/no/such/binary/does/not/exist")
+        monkeypatch.setattr(
+            tunnel, "verify_binary", lambda binary: ("/no/such/binary/does/not/exist", None)
+        )
         pid, err = start_tunnel(config_file, state_dir)
         assert pid is None
         assert err is not None
         assert "not found" in err
 
-    def test_immediately_exiting_proxy_returns_error(
+    def test_unverified_binary_returns_error_without_spawning(
         self, monkeypatch: pytest.MonkeyPatch, config_file: str, state_dir: str
+    ) -> None:
+        def reject(binary: str) -> None:
+            raise RuntimeError("unverified Xray binary")
+
+        def unexpected_spawn(*args, **kwargs):
+            pytest.fail("a rejected binary must never be executed")
+
+        monkeypatch.setattr(tunnel, "verify_binary", reject)
+        monkeypatch.setattr(tunnel.subprocess, "Popen", unexpected_spawn)
+        pid, err = start_tunnel(config_file, state_dir)
+        assert pid is None
+        assert err == "unverified Xray binary"
+        assert not (Path(state_dir) / "tunnel.pid").exists()
+
+    def test_immediately_exiting_proxy_returns_error(
+        self, monkeypatch: pytest.MonkeyPatch, config_file: str, state_dir: str,
+        tmp_path: Path,
     ) -> None:
         # A proxy that dies on startup (bad config / port in use) must NOT be
         # reported as a running tunnel.
-        monkeypatch.setenv(
-            "TRANSITVPN_PROXY_BIN", sys.executable + " -c " + "import sys; sys.exit(3)"
-        )
+        executable = _write_test_binary(tmp_path / "exiting-proxy", "exit 3")
+        monkeypatch.setattr(tunnel, "verify_binary", lambda binary: (executable, None))
+        real_popen = subprocess.Popen
+
+        def spawn_exiting_proxy(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            # Observe the real exit before returning: scheduler load must not
+            # turn this error-path test into a startup timing benchmark.
+            assert proc.wait(timeout=5) == 3
+            return proc
+
+        monkeypatch.setattr(tunnel.subprocess, "Popen", spawn_exiting_proxy)
         pid, err = start_tunnel(config_file, state_dir)
         assert pid is None, "dead proxy must not yield a pid"
         assert err is not None
@@ -426,71 +463,71 @@ class TestTunnelLifecycle:
 
 
 class TestCLILifecycle:
-    """CLI-level: up/down/status via subprocesses.
+    """CLI main entrypoint: up/down/status via explicitly injected subprocesses.
 
     Processes spawned by CLI subcommands are children of transient subprocesses
     that immediately exit, so they get re-parented to init.  Init auto-reaps
     them — no zombie issue, stop_tunnel is fast.
     """
 
-    def test_up_exits_zero_with_valid_config(self, workdir: Path, proxy_env: dict) -> None:
-        result = _run_cli("up", workdir, proxy_env)
+    def test_up_exits_zero_with_valid_config(self, workdir: Path, proxy_binary: str) -> None:
+        result = _run_cli("up", workdir, proxy_binary)
         try:
             assert result.returncode == 0, f"up failed:\n{result.stdout}{result.stderr}"
         finally:
-            _run_cli("down", workdir, proxy_env)
+            _run_cli("down", workdir, proxy_binary)
 
-    def test_up_creates_pid_file(self, workdir: Path, proxy_env: dict) -> None:
-        _run_cli("up", workdir, proxy_env)
+    def test_up_creates_pid_file(self, workdir: Path, proxy_binary: str) -> None:
+        _run_cli("up", workdir, proxy_binary)
         try:
             assert (workdir / "state" / "tunnel.pid").exists(), "tunnel.pid not created by up"
         finally:
-            _run_cli("down", workdir, proxy_env)
+            _run_cli("down", workdir, proxy_binary)
 
-    def test_up_output_contains_pid(self, workdir: Path, proxy_env: dict) -> None:
-        result = _run_cli("up", workdir, proxy_env)
+    def test_up_output_contains_pid(self, workdir: Path, proxy_binary: str) -> None:
+        result = _run_cli("up", workdir, proxy_binary)
         try:
             assert "pid=" in result.stdout, f"pid not in up output: {result.stdout!r}"
         finally:
-            _run_cli("down", workdir, proxy_env)
+            _run_cli("down", workdir, proxy_binary)
 
-    def test_status_returns_running_after_up(self, workdir: Path, proxy_env: dict) -> None:
-        _run_cli("up", workdir, proxy_env)
+    def test_status_returns_running_after_up(self, workdir: Path, proxy_binary: str) -> None:
+        _run_cli("up", workdir, proxy_binary)
         try:
-            result = _run_cli("status", workdir, proxy_env)
+            result = _run_cli("status", workdir, proxy_binary)
             assert "running" in result.stdout
             assert "not running" not in result.stdout
         finally:
-            _run_cli("down", workdir, proxy_env)
+            _run_cli("down", workdir, proxy_binary)
 
-    def test_down_kills_process_and_removes_pid(self, workdir: Path, proxy_env: dict) -> None:
-        _run_cli("up", workdir, proxy_env)
+    def test_down_kills_process_and_removes_pid(self, workdir: Path, proxy_binary: str) -> None:
+        _run_cli("up", workdir, proxy_binary)
         pid_file = workdir / "state" / "tunnel.pid"
         pid = int(pid_file.read_text().strip())
-        _run_cli("down", workdir, proxy_env)
+        _run_cli("down", workdir, proxy_binary)
         assert not pid_file.exists(), "tunnel.pid still present after down"
         assert _wait_until_dead(pid), f"process {pid} still alive after down"
 
-    def test_status_returns_not_running_after_down(self, workdir: Path, proxy_env: dict) -> None:
-        _run_cli("up", workdir, proxy_env)
-        _run_cli("down", workdir, proxy_env)
-        result = _run_cli("status", workdir, proxy_env)
+    def test_status_returns_not_running_after_down(self, workdir: Path, proxy_binary: str) -> None:
+        _run_cli("up", workdir, proxy_binary)
+        _run_cli("down", workdir, proxy_binary)
+        result = _run_cli("status", workdir, proxy_binary)
         assert "not running" in result.stdout
 
-    def test_double_down_exits_zero_both_times(self, workdir: Path, proxy_env: dict) -> None:
-        _run_cli("up", workdir, proxy_env)
-        r1 = _run_cli("down", workdir, proxy_env)
-        r2 = _run_cli("down", workdir, proxy_env)
+    def test_double_down_exits_zero_both_times(self, workdir: Path, proxy_binary: str) -> None:
+        _run_cli("up", workdir, proxy_binary)
+        r1 = _run_cli("down", workdir, proxy_binary)
+        r2 = _run_cli("down", workdir, proxy_binary)
         assert r1.returncode == 0
         assert r2.returncode == 0
 
-    def test_double_down_both_print_down_prefix(self, workdir: Path, proxy_env: dict) -> None:
-        _run_cli("up", workdir, proxy_env)
-        r1 = _run_cli("down", workdir, proxy_env)
-        r2 = _run_cli("down", workdir, proxy_env)
+    def test_double_down_both_print_down_prefix(self, workdir: Path, proxy_binary: str) -> None:
+        _run_cli("up", workdir, proxy_binary)
+        r1 = _run_cli("down", workdir, proxy_binary)
+        r2 = _run_cli("down", workdir, proxy_binary)
         assert "down:" in r1.stdout
         assert "down:" in r2.stdout
 
-    def test_down_exits_zero_when_no_tunnel_running(self, workdir: Path, proxy_env: dict) -> None:
-        result = _run_cli("down", workdir, proxy_env)
+    def test_down_exits_zero_when_no_tunnel_running(self, workdir: Path, proxy_binary: str) -> None:
+        result = _run_cli("down", workdir, proxy_binary)
         assert result.returncode == 0

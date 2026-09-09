@@ -103,6 +103,8 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
             wrapper.chmod(0o755)
 
         env = os.environ.copy()
+        env.pop("__TRANSITVPN_CERTIFICATION_GUARD", None)
+        env.pop("__TRANSITVPN_CERTIFICATION_TOKEN", None)
         env.update(
             {
                 "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
@@ -151,9 +153,10 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
         self.assertTrue(commands, "the command counter observed no runner subprocesses")
 
         python_commands = [line for line in commands if line.startswith("CMD python3")]
-        self.assertEqual(len(python_commands), 4, python_commands)
+        self.assertEqual(len(python_commands), 5, python_commands)
+        self.assertIn(str(PROJECT_ROOT / "scripts/scan-credentials.py"), python_commands[0])
         self.assertTrue(all(line.endswith("STDIN=EOF") for line in python_commands), python_commands)
-        self.assertTrue(all("NO_INPUT=1 PROMPT=0" in line for line in python_commands), python_commands)
+        self.assertTrue(all("NO_INPUT=1 PROMPT=0" in line for line in python_commands[1:]), python_commands)
 
         lock = PROJECT_ROOT / "requirements-certification.lock"
         pip = next(line for line in python_commands if " <-m> <pip> <install>" in line)
@@ -201,7 +204,7 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("pytest changed or staged tracked artifacts", completed.stderr)
         self.assertNotIn("All acceptance checks passed.", completed.stdout + completed.stderr)
-        self.assertEqual(sum(line.startswith("CMD git") for line in commands), 6, commands)
+        self.assertEqual(sum(line.startswith("CMD git") for line in commands), 4, commands)
         self.assertEqual(sum(line.startswith("CMD cmp") for line in commands), 1, commands)
 
     def test_collection_failure_is_bounded_detached_and_never_runs_tests(self) -> None:

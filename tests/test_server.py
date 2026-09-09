@@ -11,6 +11,33 @@ from transitvpn.keygen import Keys, generate_keys
 from transitvpn.server import build_ss_config, build_xray_config
 
 
+_TARGET = "verified-target.example:443"
+_SERVER_NAME = "verified-target.example"
+_SHORT_ID = "a1b2c3d4"
+
+
+def _verified_xray(keys: Keys, **overrides) -> dict:
+    """Supply explicit synthetic deployment inputs; no network verification claim."""
+    inputs = dict(target=_TARGET, server_name=_SERVER_NAME,
+                  short_id=_SHORT_ID, target_verified=True)
+    inputs.update(overrides)
+    return build_xray_config(keys, **inputs)
+
+
+class TestRequiredDeploymentInputs:
+    def test_implicit_target_is_rejected(self, keys):
+        with pytest.raises(ValueError):
+            build_xray_config(keys)
+
+    @pytest.mark.parametrize("field,value", [
+        ("target", ""), ("server_name", ""), ("short_id", ""),
+        ("target_verified", False),
+    ])
+    def test_missing_or_unverified_inputs_are_rejected(self, keys, field, value):
+        with pytest.raises(ValueError):
+            _verified_xray(keys, **{field: value})
+
+
 # ---------------------------------------------------------------------------
 # Fixtures — real Keys, no mocking
 # ---------------------------------------------------------------------------
@@ -23,7 +50,7 @@ def keys() -> Keys:
 
 @pytest.fixture()
 def xray(keys: Keys) -> dict:
-    return build_xray_config(keys)
+    return _verified_xray(keys)
 
 
 @pytest.fixture()
@@ -72,7 +99,7 @@ class TestXrayTopLevelShape:
         assert len(xray["outbounds"]) == 1
 
     def test_no_unexpected_top_level_keys(self, xray):
-        assert set(xray.keys()) == {"inbounds", "outbounds"}
+        assert set(xray.keys()) == {"log", "inbounds", "outbounds"}
 
 
 # ---------------------------------------------------------------------------
@@ -100,15 +127,15 @@ class TestXrayInbound:
         assert "streamSettings" in _inbound(xray)
 
     def test_custom_port_is_applied(self, keys):
-        cfg = build_xray_config(keys, port=8443)
+        cfg = _verified_xray(keys, port=8443)
         assert _inbound(cfg)["port"] == 8443
 
     def test_port_1_is_accepted(self, keys):
-        cfg = build_xray_config(keys, port=1)
+        cfg = _verified_xray(keys, port=1)
         assert _inbound(cfg)["port"] == 1
 
     def test_port_65535_is_accepted(self, keys):
-        cfg = build_xray_config(keys, port=65535)
+        cfg = _verified_xray(keys, port=65535)
         assert _inbound(cfg)["port"] == 65535
 
 
@@ -128,18 +155,18 @@ class TestXrayVlessClientSettings:
         assert len(_settings(xray)["clients"]) == 1
 
     def test_client_id_matches_keys_vless_uuid(self, keys):
-        cfg = build_xray_config(keys)
+        cfg = _verified_xray(keys)
         assert _settings(cfg)["clients"][0]["id"] == keys.vless_uuid
 
     def test_client_id_is_not_hardcoded(self):
         # Two different Keys objects must produce different client ids.
         k1, k2 = generate_keys(), generate_keys()
-        id1 = _settings(build_xray_config(k1))["clients"][0]["id"]
-        id2 = _settings(build_xray_config(k2))["clients"][0]["id"]
+        id1 = _settings(_verified_xray(k1))["clients"][0]["id"]
+        id2 = _settings(_verified_xray(k2))["clients"][0]["id"]
         assert id1 != id2
 
     def test_client_id_is_valid_uuid(self, keys):
-        cfg = build_xray_config(keys)
+        cfg = _verified_xray(keys)
         client_id = _settings(cfg)["clients"][0]["id"]
         parsed = uuid.UUID(client_id)
         assert str(parsed) == client_id
@@ -163,8 +190,8 @@ class TestXrayVlessClientSettings:
 
 
 class TestXrayStreamSettings:
-    def test_network_is_tcp(self, xray):
-        assert _stream(xray)["network"] == "tcp"
+    def test_network_is_raw(self, xray):
+        assert _stream(xray)["network"] == "raw"
 
     def test_security_is_reality(self, xray):
         assert _stream(xray)["security"] == "reality"
@@ -183,71 +210,68 @@ class TestXrayRealitySettings:
         assert show is False
         assert isinstance(show, bool)
 
-    def test_default_dest_is_microsoft(self, xray):
-        assert _reality(xray)["dest"] == "www.microsoft.com:443"
+    def test_explicit_target_is_applied(self, xray):
+        assert _reality(xray)["target"] == _TARGET
+        assert "dest" not in _reality(xray)
 
-    def test_custom_dest_applied(self, keys):
-        cfg = build_xray_config(keys, dest="www.google.com:443")
-        assert _reality(cfg)["dest"] == "www.google.com:443"
+    def test_custom_target_applied(self, keys):
+        cfg = _verified_xray(keys, target="alternate-target.example:8443")
+        assert _reality(cfg)["target"] == "alternate-target.example:8443"
 
-    def test_xver_is_int_zero(self, xray):
-        xver = _reality(xray)["xver"]
-        assert xver == 0
-        assert isinstance(xver, int)
+    def test_warning_log_level(self, xray):
+        assert xray["log"] == {"loglevel": "warning"}
 
     def test_server_names_is_list(self, xray):
         assert isinstance(_reality(xray)["serverNames"], list)
 
-    def test_default_server_names_contains_microsoft(self, xray):
-        assert "www.microsoft.com" in _reality(xray)["serverNames"]
+    def test_explicit_server_name_is_applied(self, xray):
+        assert _reality(xray)["serverNames"] == [_SERVER_NAME]
 
-    def test_default_server_names_has_one_entry(self, xray):
+    def test_server_names_has_one_entry(self, xray):
         assert len(_reality(xray)["serverNames"]) == 1
 
-    def test_custom_server_names_applied(self, keys):
-        names = ["vpn.example.com", "backup.example.com"]
-        cfg = build_xray_config(keys, server_names=names)
-        assert _reality(cfg)["serverNames"] == names
+    def test_custom_server_name_applied(self, keys):
+        cfg = _verified_xray(keys, server_name="alternate-target.example")
+        assert _reality(cfg)["serverNames"] == ["alternate-target.example"]
 
-    def test_server_names_none_gives_default(self, keys):
-        cfg = build_xray_config(keys, server_names=None)
-        assert _reality(cfg)["serverNames"] == ["www.microsoft.com"]
+    def test_empty_server_name_is_rejected(self, keys):
+        with pytest.raises(ValueError):
+            _verified_xray(keys, server_name="")
 
     def test_private_key_matches_keys_field(self, keys):
-        cfg = build_xray_config(keys)
+        cfg = _verified_xray(keys)
         assert _reality(cfg)["privateKey"] == keys.reality_private_key
 
     def test_private_key_is_string(self, keys):
-        cfg = build_xray_config(keys)
+        cfg = _verified_xray(keys)
         assert isinstance(_reality(cfg)["privateKey"], str)
 
     def test_private_key_is_not_public_key(self, keys):
-        cfg = build_xray_config(keys)
+        cfg = _verified_xray(keys)
         assert _reality(cfg)["privateKey"] != keys.reality_public_key
 
     def test_private_key_differs_between_different_keys(self):
         k1, k2 = generate_keys(), generate_keys()
-        pk1 = _reality(build_xray_config(k1))["privateKey"]
-        pk2 = _reality(build_xray_config(k2))["privateKey"]
+        pk1 = _reality(_verified_xray(k1))["privateKey"]
+        pk2 = _reality(_verified_xray(k2))["privateKey"]
         assert pk1 != pk2
 
     def test_short_ids_is_list(self, xray):
         assert isinstance(_reality(xray)["shortIds"], list)
 
-    def test_default_short_ids_is_list_with_empty_string(self, xray):
-        assert _reality(xray)["shortIds"] == [""]
+    def test_explicit_short_id_is_applied(self, xray):
+        assert _reality(xray)["shortIds"] == [_SHORT_ID]
 
-    def test_custom_short_ids_applied(self, keys):
-        ids = ["a1b2c3d4", "e5f6a7b8"]
-        cfg = build_xray_config(keys, short_ids=ids)
-        assert _reality(cfg)["shortIds"] == ids
+    def test_custom_short_id_applied(self, keys):
+        cfg = _verified_xray(keys, short_id="e5f6a7b8")
+        assert _reality(cfg)["shortIds"] == ["e5f6a7b8"]
 
-    def test_short_ids_none_gives_default(self, keys):
-        cfg = build_xray_config(keys, short_ids=None)
-        assert _reality(cfg)["shortIds"] == [""]
+    def test_empty_short_id_is_rejected(self, keys):
+        with pytest.raises(ValueError):
+            _verified_xray(keys, short_id="")
 
     def test_all_required_reality_fields_present(self, xray):
-        required = {"show", "dest", "xver", "serverNames", "privateKey", "shortIds"}
+        required = {"show", "target", "serverNames", "privateKey", "shortIds"}
         assert required.issubset(_reality(xray).keys())
 
 
@@ -273,22 +297,22 @@ class TestXrayMutableDefaultIsolation:
     """Mutations to one call's output must never bleed into the next call's defaults."""
 
     def test_mutating_returned_server_names_does_not_affect_next_default(self, keys):
-        cfg1 = build_xray_config(keys)
+        cfg1 = _verified_xray(keys)
         _reality(cfg1)["serverNames"].append("attacker.com")
 
-        cfg2 = build_xray_config(keys)
+        cfg2 = _verified_xray(keys)
         assert "attacker.com" not in _reality(cfg2)["serverNames"]
 
     def test_mutating_returned_short_ids_does_not_affect_next_default(self, keys):
-        cfg1 = build_xray_config(keys)
+        cfg1 = _verified_xray(keys)
         _reality(cfg1)["shortIds"].append("leaked_id")
 
-        cfg2 = build_xray_config(keys)
+        cfg2 = _verified_xray(keys)
         assert "leaked_id" not in _reality(cfg2)["shortIds"]
 
     def test_mutating_clients_does_not_change_keys_uuid(self, keys):
         original_uuid = keys.vless_uuid
-        cfg = build_xray_config(keys)
+        cfg = _verified_xray(keys)
         _settings(cfg)["clients"][0]["id"] = "overwritten"
         assert keys.vless_uuid == original_uuid
 
@@ -318,8 +342,8 @@ class TestXrayJsonRoundtrip:
         assert parsed["inbounds"][0]["streamSettings"]["realitySettings"]["show"] is False
 
     def test_json_server_names_survive_roundtrip(self, keys):
-        names = ["vpn.example.com", "alt.example.com"]
-        cfg = build_xray_config(keys, server_names=names)
+        names = ["alternate-target.example"]
+        cfg = _verified_xray(keys, server_name=names[0])
         restored = json.loads(json.dumps(cfg))
         assert restored["inbounds"][0]["streamSettings"]["realitySettings"]["serverNames"] == names
 
@@ -467,7 +491,7 @@ class TestSsConfigJsonRoundtrip:
 
 class TestCrossFunctionIndependence:
     def test_xray_and_ss_configs_from_same_keys_have_independent_passwords(self, keys):
-        xray_cfg = build_xray_config(keys)
+        xray_cfg = _verified_xray(keys)
         ss_cfg = build_ss_config(keys)
         # The ss password must not appear as the VLESS client id or private key.
         vless_id = _settings(xray_cfg)["clients"][0]["id"]
@@ -476,8 +500,8 @@ class TestCrossFunctionIndependence:
         assert ss_cfg["password"] != private_key
 
     def test_repeated_xray_calls_return_equal_configs_for_same_keys(self, keys):
-        cfg1 = build_xray_config(keys)
-        cfg2 = build_xray_config(keys)
+        cfg1 = _verified_xray(keys)
+        cfg2 = _verified_xray(keys)
         assert cfg1 == cfg2
 
     def test_repeated_ss_calls_return_equal_configs_for_same_keys(self, keys):

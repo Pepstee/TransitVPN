@@ -83,7 +83,9 @@ def _ephemeral_port() -> int:
         raise XrayCertificationError("could not allocate a loopback port") from exc
 
 
-def _configs(server_port: int, socks_port: int, client_id: str) -> dict[str, dict[str, Any]]:
+def _configs(
+    server_port: int, socks_port: int, client_id: str, *, responder_port: int | None = None
+) -> dict[str, dict[str, Any]]:
     common_log = {"loglevel": "none"}
     server = {
         "log": common_log,
@@ -99,6 +101,16 @@ def _configs(server_port: int, socks_port: int, client_id: str) -> dict[str, dic
         }],
         "outbounds": [{"protocol": "freedom"}],
     }
+    if responder_port is not None:
+        # The pinned Xray blocks private destinations on VLESS by default.
+        # Permit only this temporary IPv4 responder, never a private subnet.
+        server["outbounds"][0]["settings"] = {
+            "targetStrategy": "ForceIPv4",
+            "finalRules": [{
+                "action": "allow", "network": "tcp",
+                "ip": [_LOOPBACK + "/32"], "port": str(responder_port),
+            }],
+        }
     client = {
         "log": common_log,
         "inbounds": [{
@@ -304,7 +316,10 @@ def certify_local_tunnel(
         while socks_port == server_port:
             socks_port = _ephemeral_port()
         try:
-            configs = _configs(server_port, socks_port, str(uuid.uuid4()))
+            configs = _configs(
+                server_port, socks_port, str(uuid.uuid4()),
+                responder_port=int(responder.server_address[1]),
+            )
         except (TypeError, ValueError) as exc:
             raise XrayCertificationError("generated Xray configuration could not be created") from exc
         try:

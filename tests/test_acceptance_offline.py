@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 from unittest.mock import patch
@@ -35,12 +36,19 @@ def _run_acceptance(extra_env: dict[str, str] | None = None) -> subprocess.Compl
     env = {**os.environ}
     if extra_env:
         env.update(extra_env)
+    # The shell intentionally clears PYTHONPATH. Inject the audit into the real
+    # Python demonstration directly, and verify activation via a positive control.
+    command = ["bash", str(_REPO / "acceptance")]
+    if "SOCKET_SHIM_LOG" in env:
+        command = [sys.executable, "-c",
+                   "import runpy; runpy.run_module('scripts.acceptance_demo', run_name='__main__')"]
     return subprocess.run(
-        ["bash", str(_REPO / "acceptance")],
+        command,
         capture_output=True,
         text=True,
         cwd=str(_REPO),
         env=env,
+        timeout=60,
     )
 
 
@@ -117,7 +125,7 @@ def shim_env(tmp_path: Path):
     log_file = tmp_path / "network.log"
     (shim_dir / "sitecustomize.py").write_text(_SOCKET_SHIM)
     old_pp = os.environ.get("PYTHONPATH", "")
-    pythonpath = str(shim_dir) + (":" + old_pp if old_pp else "")
+    pythonpath = str(shim_dir) + ":" + str(_REPO) + (":" + old_pp if old_pp else "")
     return {
         "PYTHONPATH": pythonpath,
         "SOCKET_SHIM_LOG": str(log_file),
@@ -343,6 +351,15 @@ class TestNoNetworkCallsViaSocketShim:
     OSError, the log file proves the attempt happened.
     """
 
+    def test_shim_positive_control_logs_blocked_connection(self, shim_env):
+        env_vars, log_file = shim_env
+        result = subprocess.run(
+            [sys.executable, "-c", "import socket; socket.socket().connect(('203.0.113.1', 443))"],
+            env={**os.environ, **env_vars}, capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode != 0
+        assert "BLOCKED_EXTERNAL_CONNECT" in log_file.read_text()
+
     def test_exits_zero_with_socket_shim(self, shim_env) -> None:
         env_vars, _ = shim_env
         result = _run_acceptance(env_vars)
@@ -501,27 +518,20 @@ class TestDetectCgnatDryRunUnit:
 class TestAcceptanceScriptStructure:
     """Static assertions on the acceptance script text.
 
-    The script must call ``bootstrap --dry-run`` — calling bare ``bootstrap``
-    would invoke detect_cgnat(dry_run=False) which fires real network probes.
+    The shell delegates to the Python demonstration. Parser validation remains
+    offline, while actual bootstrap validation is covered by the CLI tests.
     """
 
-    def test_acceptance_script_contains_dry_run_flag(self) -> None:
-        content = (_REPO / "acceptance").read_text()
-        assert "--dry-run" in content, (
-            "acceptance script must pass --dry-run to bootstrap to avoid network probes"
-        )
-
-    def test_every_bootstrap_invocation_has_dry_run(self) -> None:
-        content = (_REPO / "acceptance").read_text()
-        for line in content.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            if "bootstrap" in stripped:
-                assert "--dry-run" in stripped, (
-                    f"bootstrap called without --dry-run: {stripped!r}\n"
-                    "This would trigger real network probes and violate the offline criterion."
-                )
+    def test_delegated_bootstrap_parser_requires_explicit_offline_inputs(self):
+        from transitvpn.cli import build_parser
+        parsed = build_parser().parse_args([
+            "bootstrap", "--dry-run", "--host", "example.invalid",
+            "--target", "example.invalid:443", "--server-name", "example.invalid",
+            "--target-verified",
+        ])
+        assert parsed.dry_run and parsed.target_verified
+        assert parsed.host == parsed.server_name == "example.invalid"
+        assert parsed.target == "example.invalid:443"
 
     def test_acceptance_script_has_no_pip_install(self) -> None:
         content = (_REPO / "acceptance").read_text()
@@ -566,55 +576,28 @@ class TestAcceptanceScriptStructure:
 
 
 class TestCliBootstrapDryRunWiring:
-    """Verify the CLI passes dry_run=True to detect_cgnat when --dry-run is given."""
+    """Bootstrap validates explicit deployment inputs without CGNAT probing.
 
-    def test_bootstrap_dry_run_flag_calls_detect_cgnat_with_dry_run_true(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        from transitvpn.cgnat import CgnatResult, CgnatStatus
+    CGNAT detection remains covered independently above. Its former automatic
+    bootstrap integration is absent and is reported separately for reconciliation.
+    """
+
+    @pytest.mark.parametrize("dry_run", [True, False])
+    def test_bootstrap_does_not_probe_and_fails_closed_without_binary(
+        self, tmp_path, monkeypatch, dry_run
+    ):
+        from transitvpn import cgnat
+        from transitvpn.cli import main
         monkeypatch.chdir(tmp_path)
-        captured = {}
-        from transitvpn import cgnat as _cgnat
-
-        def _spy(**kwargs):
-            captured.update(kwargs)
-            return CgnatResult(
-                status=CgnatStatus.UNKNOWN,
-                details=["dry-run: network probes skipped"],
-            )
-
-        with patch.object(_cgnat, "detect_cgnat", side_effect=_spy):
-            from transitvpn.cli import main
-            main(["bootstrap", "--dry-run"])
-
-        assert captured.get("dry_run") is True, (
-            f"detect_cgnat was called with {captured!r}, expected dry_run=True"
-        )
-
-    def test_bootstrap_without_dry_run_calls_detect_cgnat_with_dry_run_false(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        from transitvpn.cgnat import CgnatResult, CgnatStatus
-        monkeypatch.chdir(tmp_path)
-        captured = {}
-        from transitvpn import cgnat as _cgnat
-
-        def _spy(**kwargs):
-            captured.update(kwargs)
-            return CgnatResult(
-                status=CgnatStatus.NOT_BEHIND_CGNAT,
-                public_ip="1.2.3.4",
-                local_ip="192.168.0.1",
-                details=[],
-            )
-
-        with patch.object(_cgnat, "detect_cgnat", side_effect=_spy):
-            from transitvpn.cli import main
-            main(["bootstrap"])
-
-        assert captured.get("dry_run") is False, (
-            f"detect_cgnat was called with {captured!r}, expected dry_run=False"
-        )
+        args = ["bootstrap", "--host", "example.invalid", "--target", "example.invalid:443",
+                "--server-name", "example.invalid", "--target-verified",
+                "--xray-binary", str(tmp_path / "missing-xray")]
+        if dry_run:
+            args.append("--dry-run")
+        with patch.object(cgnat, "detect_cgnat") as probe:
+            assert main(args) == 1
+        probe.assert_not_called()
+        assert not (tmp_path / "state").exists()
 
 
 # ---------------------------------------------------------------------------

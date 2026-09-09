@@ -65,3 +65,30 @@ def build_xray_config(keys: Keys, **kwargs: Any) -> dict[str, Any]:
     if kwargs:
         raise TypeError(f"unexpected arguments: {', '.join(kwargs)}")
     return build_server_config(deployment)
+
+
+def build_ss_config(
+    keys: Keys,
+    *,
+    server: str = "0.0.0.0",
+    port: int = 8388,
+    method: str = "2022-blake3-aes-256-gcm",
+) -> dict[str, Any]:
+    """Build a standalone Shadowsocks configuration without starting a service.
+
+    This retained export helper is not an automatic fallback or evidence of
+    censorship resistance. Deployment and reachability require separate checks.
+    """
+    if not isinstance(server, str) or not server.strip():
+        raise ValueError("server must be nonblank")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError("port must be between 1 and 65535")
+    if method not in {"2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"}:
+        raise ValueError("method must use a supported 32-byte-key Shadowsocks cipher")
+    return {
+        "server": server,
+        "server_port": port,
+        "password": keys.ss_password,
+        "method": method,
+        "mode": "tcp_and_udp",
+    }

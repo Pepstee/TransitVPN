@@ -44,3 +44,36 @@ test independent connectivity before travel rather than treating the same endpoi
 Never publish, log, commit, or reuse files in `state/`; they contain long-term credentials. Rotate
 by generating a new deployment, validating both peers, distributing the new client file through a
 secure channel, and then removing the old UUID/short ID from the live server.
+
+## Migration reconciliation
+
+The mapped Mac checkout at `86d19f2` is the canonical source. Its untracked temporary
+files contain test/runtime artefacts and no source candidates; they remain on the Mac
+and are excluded from migration. The standalone Shadowsocks configuration export
+helper is retained alongside the existing URI helper. It does not enable automatic
+fallback or claim censorship resistance. CGNAT detection and key generation remain
+library capabilities; automatic CGNAT bootstrap integration and a keygen CLI are
+not implemented. Old tests that relied on an implicit target
+and empty short ID must use the explicit validated deployment contract.
+
+The local tunnel certificate exercises plain VLESS RAW on loopback, not REALITY.
+Real-binary configuration validation and a loopback pass do not establish a working
+public REALITY deployment, DNS-leak protection or Beijing reachability. The current
+status command checks process existence only. Persistent service installation,
+upgrade/rollback, recovery endpoint provisioning and complete client setup remain
+unimplemented. Runtime `up` starts a server and is not used as a migration smoke test.
+
+The deterministic code index under `graphify-out` has a distinct machine-readable
+navigation role; this document remains the owner of human-readable migration scope.
+
+The pinned Xray release blocks private destinations by default. The temporary
+loopback certificate grants TCP access only to its own `127.0.0.1/32` responder
+and exact ephemeral port, resolving `localhost` to IPv4. Production deployment
+configuration receives no such exception. Real application bytes passed this
+certificate on both macOS ARM64 and ArtVault Linux x86-64.
+
+For migration, certification runs on a tracked-source export so local runtime
+artefacts are neither scanned nor transferred. Its child commands inherit that
+source path even when their working directory changes. Historical assertions
+about shell grep ordering are retired: the acceptance launcher now delegates to
+Python, and retained subprocess tests verify the actual down/status behaviour.

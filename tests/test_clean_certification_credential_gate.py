@@ -97,6 +97,8 @@ class CleanCertificationCredentialGateTests(unittest.TestCase):
         mktemp.chmod(0o755)
 
         env = os.environ.copy()
+        env.pop("__TRANSITVPN_CERTIFICATION_GUARD", None)
+        env.pop("__TRANSITVPN_CERTIFICATION_TOKEN", None)
         env.update(
             {
                 "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",

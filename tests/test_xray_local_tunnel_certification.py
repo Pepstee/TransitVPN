@@ -32,6 +32,15 @@ def _assert_absent_from_repository(test: unittest.TestCase, values: tuple[str, .
 
 
 class LocalXrayTunnelCertificationTests(unittest.TestCase):
+    def test_private_destination_exception_is_limited_to_the_responder(self) -> None:
+        configs = certification._configs(23451, 23452, str(uuid.uuid4()), responder_port=23453)
+        settings = configs["server"]["outbounds"][0]["settings"]
+        self.assertEqual(settings["targetStrategy"], "ForceIPv4")
+        self.assertEqual(settings["finalRules"], [{
+            "action": "allow", "network": "tcp", "ip": ["127.0.0.1/32"], "port": "23453",
+        }])
+        self.assertNotIn("settings", certification._configs(23451, 23452, str(uuid.uuid4()))["server"]["outbounds"][0])
+
     def test_real_pinned_xray_transfers_application_bytes_when_available(self) -> None:
         try:
             executable, _ = xray.verify_binary()
