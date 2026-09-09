@@ -1,5 +1,11 @@
 # TransitVPN
 
+## ArtVault installation
+
+The working source is `/srv/artvault/projects/transitvpn/workspace`; from the workspace run
+`../.venv/bin/transitvpn --help`. All 670 tests passed on Mac and Linux. The pinned Xray loopback
+certificate passed on both systems, but public REALITY deployment and recovery remain unprovisioned.
+
 TransitVPN generates a matched Xray server/client pair for VLESS over REALITY RAW. It pins
 Xray **26.7.11** and refuses to write either configuration unless that exact executable accepts
 both with its native config test. The non-secret identity record contains only the version and
