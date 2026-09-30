@@ -491,12 +491,40 @@ class TestCLILifecycle:
         finally:
             _run_cli("down", workdir, proxy_binary)
 
-    def test_status_returns_running_after_up(self, workdir: Path, proxy_binary: str) -> None:
+    def test_status_reports_live_process_after_up(
+        self, workdir: Path, proxy_binary: str
+    ) -> None:
         _run_cli("up", workdir, proxy_binary)
         try:
             result = _run_cli("status", workdir, proxy_binary)
-            assert "running" in result.stdout
+            assert "status: live process (pid=" in result.stdout
+            assert "tunnel health unverified" in result.stdout
             assert "not running" not in result.stdout
+        finally:
+            _run_cli("down", workdir, proxy_binary)
+
+    def test_status_reports_crashed_daemon_and_up_recovers(
+        self, workdir: Path, proxy_binary: str
+    ) -> None:
+        pid_file = workdir / "state" / "tunnel.pid"
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(_dead_pid()), encoding="utf-8")
+
+        crashed_status = _run_cli("status", workdir, proxy_binary)
+        assert crashed_status.returncode == 0
+        assert "status: not running; tunnel health unavailable" in crashed_status.stdout
+        assert "live process" not in crashed_status.stdout
+
+        recovered_up = _run_cli("up", workdir, proxy_binary)
+        try:
+            assert recovered_up.returncode == 0, (
+                f"up did not recover after a crashed daemon:\n"
+                f"{recovered_up.stdout}{recovered_up.stderr}"
+            )
+            recovered_status = _run_cli("status", workdir, proxy_binary)
+            assert recovered_status.returncode == 0
+            assert "status: live process (pid=" in recovered_status.stdout
+            assert "tunnel health unverified" in recovered_status.stdout
         finally:
             _run_cli("down", workdir, proxy_binary)
 
