@@ -96,6 +96,62 @@ class CredentialBoundaryScannerTests(unittest.TestCase):
         self.assertEqual(0, status)
         self.assertEqual("", diagnostic)
 
+    def test_git_absent_deployment_walks_the_source_tree(self) -> None:
+        canaries = credential_canaries()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "transitvpn"
+            source.mkdir()
+            source_canary = source / "uuid.txt"
+            source_canary.write_text(canaries["uuid-credential"], encoding="utf-8")
+            cache = root / "__pycache__"
+            cache.mkdir()
+            cache_canary = cache / "leak.txt"
+            cache_canary.write_text(canaries["password-token"], encoding="utf-8")
+
+            stderr = io.StringIO()
+            missing_git = mock.Mock(returncode=128, stdout=b"")
+            with (
+                mock.patch.object(scanner, "ROOT", root),
+                mock.patch.object(scanner.subprocess, "run", missing_git),
+                redirect_stderr(stderr),
+            ):
+                status = scanner.main()
+
+        self.assertEqual(1, status)
+        self.assertIn("transitvpn/uuid.txt: uuid-credential", stderr.getvalue())
+        self.assertNotIn("__pycache__", stderr.getvalue())
+
+    def test_git_absent_fallback_ignores_symlinks_outside_root(self) -> None:
+        canaries = credential_canaries()
+        with tempfile.TemporaryDirectory() as outer:
+            root = Path(outer) / "project"
+            root.mkdir()
+            source = root / "transitvpn"
+            source.mkdir()
+            source_canary = source / "uuid.txt"
+            source_canary.write_text(canaries["uuid-credential"], encoding="utf-8")
+            outside = Path(outer) / "outside-root"
+            outside.mkdir()
+            external = outside / "external.txt"
+            external.write_text(canaries["private-key"], encoding="utf-8")
+            (source / "escape").symlink_to(external)
+
+            stderr = io.StringIO()
+            missing_git = mock.Mock(returncode=128, stdout=b"")
+            with (
+                mock.patch.object(scanner, "ROOT", root),
+                mock.patch.object(scanner.subprocess, "run", missing_git),
+                redirect_stderr(stderr),
+            ):
+                status = scanner.main()
+
+        self.assertEqual(1, status)
+        self.assertIn("transitvpn/uuid.txt: uuid-credential", stderr.getvalue())
+        self.assertNotIn("escape", stderr.getvalue())
+        self.assertNotIn("outside-root", stderr.getvalue())
+        self.assertNotIn("external.txt", stderr.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

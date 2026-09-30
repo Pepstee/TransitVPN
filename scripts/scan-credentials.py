@@ -62,6 +62,41 @@ PEM = re.compile(
 )
 
 
+NOISE_PARTS = frozenset({
+    ".git",
+    ".hg",
+    ".svn",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".venv",
+    "venv",
+})
+
+
+def repository_walk() -> set[Path]:
+    """Inventory a source tree without Git metadata (Git-archive deployment).
+
+    Generated credential directories remain covered by ``candidate_files``;
+    caches, virtual environments and version-control internals are not
+    project source and are excluded here only for that walk.
+    """
+    files: set[Path] = set()
+    for path in ROOT.rglob("*"):
+        relative = path.relative_to(ROOT)
+        if NOISE_PARTS.intersection(relative.parts):
+            continue
+        try:
+            # Symlinks are not scanned: following one here (or later in
+            # ``findings``) could read a file outside the project root.
+            if not path.is_symlink() and path.is_file():
+                files.add(path)
+        except OSError as exc:
+            raise RuntimeError("repository-walk") from exc
+    return files
+
+
 def tracked_files() -> set[Path]:
     result = subprocess.run(
         ["git", "-C", str(ROOT), "ls-files", "-z"],
@@ -70,7 +105,10 @@ def tracked_files() -> set[Path]:
         check=False,
     )
     if result.returncode:
-        raise RuntimeError("git-ls-files")
+        # Deployment copies distributed as Git archives carry no ``.git``;
+        # fall back to walking the source tree instead of refusing, so the
+        # acceptance gate still scans every source and generated file.
+        return repository_walk()
     return {ROOT / os.fsdecode(name) for name in result.stdout.split(b"\0") if name}
 
 
@@ -107,6 +145,8 @@ def allowed(lines: list[str], position: int, rule: str) -> bool:
 
 
 def findings(path: Path) -> set[str]:
+    if path.is_symlink():
+        return set()
     try:
         content = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError):
