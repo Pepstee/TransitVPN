@@ -1,8 +1,7 @@
-"""Process lifecycle checks with an explicitly injected test executable.
+"""Process lifecycle checks and pinned-Xray restart acceptance.
 
-Only the binary-verification return value is replaced. The lifecycle and CLI
-still spawn, inspect and terminate real processes. These checks do not certify
-Xray trust or networking, which have separate pinned-binary tests.
+Most tests inject a fake executable to exercise process management. The real
+restart acceptance uses the pinned binary and verifies application data.
 """
 
 from __future__ import annotations
@@ -463,11 +462,10 @@ class TestTunnelLifecycle:
 
 
 class TestCLILifecycle:
-    """CLI main entrypoint: up/down/status via explicitly injected subprocesses.
+    """CLI lifecycle checks using fake processes and one pinned-Xray acceptance.
 
-    Processes spawned by CLI subcommands are children of transient subprocesses
-    that immediately exit, so they get re-parented to init.  Init auto-reaps
-    them — no zombie issue, stop_tunnel is fast.
+    Fake-process cases spawn the CLI in short-lived subprocesses. The real Xray
+    case runs the managed server through an actual crash and restart.
     """
 
     def test_up_exits_zero_with_valid_config(self, workdir: Path, proxy_binary: str) -> None:
@@ -527,6 +525,180 @@ class TestCLILifecycle:
             assert "tunnel health unverified" in recovered_status.stdout
         finally:
             _run_cli("down", workdir, proxy_binary)
+
+    def test_real_xray_crash_restart_proves_http_and_status_stays_cautious(self) -> None:
+        """Exercise the managed daemon restart against real pinned Xray traffic."""
+        import socket
+        import tempfile
+        import threading
+        import uuid
+
+        from transitvpn import xray_certification as certification
+        from transitvpn.tunnel import get_status
+
+        executable, _ = certification.verify_binary("xray")
+        response_body = ("restart-proof:" + uuid.uuid4().hex).encode("ascii")
+        responder = certification._Responder(response_body)
+        responder_thread = threading.Thread(
+            target=responder.serve_forever, daemon=True
+        )
+        client_process = None
+        responder_started = False
+
+        with tempfile.TemporaryDirectory(
+            prefix="transitvpn-restart-acceptance-"
+        ) as raw_dir:
+            workdir = Path(raw_dir)
+            state_dir = workdir / "state"
+            state_dir.mkdir()
+
+            server_port = certification._ephemeral_port()
+            socks_port = certification._ephemeral_port()
+            while socks_port == server_port:
+                socks_port = certification._ephemeral_port()
+
+            configs = certification._configs(
+                server_port,
+                socks_port,
+                str(uuid.uuid4()),
+                responder_port=int(responder.server_address[1]),
+            )
+            certification.validate_configs(configs, binary=executable)
+            server_config = state_dir / "xray-server.json"
+            client_config = workdir / "xray-client.json"
+            certification._write_config(server_config, configs["server"])
+            certification._write_config(client_config, configs["client"])
+
+            project_root = Path(__file__).resolve().parents[1]
+            env = {
+                **os.environ,
+                "PYTHONPATH": str(project_root)
+                + os.pathsep
+                + os.environ.get("PYTHONPATH", ""),
+                "TRANSITVPN_PROXY_BIN": executable,
+            }
+            entrypoint = (
+                "import sys; from transitvpn.cli import main; "
+                "raise SystemExit(main(sys.argv[1:]))"
+            )
+
+            def run_cli(command: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [sys.executable, "-c", entrypoint, command],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(workdir),
+                    env=env,
+                    timeout=20,
+                )
+
+            def wait_server_ready(timeout: float = 10.0) -> None:
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    running, _ = get_status(str(state_dir))
+                    if not running:
+                        raise AssertionError("managed Xray daemon exited before becoming ready")
+                    try:
+                        with socket.create_connection(
+                            ("127.0.0.1", server_port), timeout=0.1
+                        ):
+                            return
+                    except OSError:
+                        time.sleep(0.025)
+                raise AssertionError("managed Xray server did not become ready")
+
+            try:
+                responder_thread.start()
+                responder_started = True
+
+                first_up = run_cli("up")
+                assert first_up.returncode == 0, first_up.stdout + first_up.stderr
+                server_pid_file = state_dir / "tunnel.pid"
+                first_pid = int(server_pid_file.read_text(encoding="utf-8"))
+                wait_server_ready()
+
+                client_process = certification._start(
+                    executable, client_config, "client"
+                )
+                certification._wait_ready(
+                    client_process, socks_port, "client", time.monotonic() + 10.0
+                )
+                status_before = run_cli("status")
+                assert status_before.returncode == 0
+                assert "status: live process (pid=" in status_before.stdout
+                assert "tunnel health unverified" in status_before.stdout
+                assert certification._probe(
+                    socks_port,
+                    int(responder.server_address[1]),
+                    response_body,
+                    timeout=5.0,
+                ) == len(response_body)
+                assert responder.request_count == 1
+
+                os.kill(first_pid, signal.SIGKILL)
+                crash_deadline = time.monotonic() + 5.0
+                while (
+                    get_status(str(state_dir))[0]
+                    and time.monotonic() < crash_deadline
+                ):
+                    time.sleep(0.025)
+                assert not get_status(str(state_dir))[0], "killed daemon still appears live"
+                crashed_status = run_cli("status")
+                assert crashed_status.returncode == 0
+                assert (
+                    "status: not running; tunnel health unavailable"
+                    in crashed_status.stdout
+                )
+                assert client_process.poll() is None, "negative control lost the client process"
+                with pytest.raises(certification.XrayCertificationError):
+                    certification._probe(
+                        socks_port,
+                        int(responder.server_address[1]),
+                        response_body,
+                        timeout=2.0,
+                    )
+                assert responder.request_count == 1
+
+                restarted = run_cli("up")
+                assert restarted.returncode == 0, restarted.stdout + restarted.stderr
+                wait_server_ready()
+                status_after = run_cli("status")
+                assert status_after.returncode == 0
+                assert "status: live process (pid=" in status_after.stdout
+                assert "tunnel health unverified" in status_after.stdout
+                assert certification._probe(
+                    socks_port,
+                    int(responder.server_address[1]),
+                    response_body,
+                    timeout=5.0,
+                ) == len(response_body)
+                assert responder.request_count == 2
+
+                # A live server PID is not proof that a client data path works.
+                assert certification._stop(client_process)
+                client_process = None
+                with pytest.raises(certification.XrayCertificationError):
+                    certification._probe(
+                        socks_port,
+                        int(responder.server_address[1]),
+                        response_body,
+                        timeout=2.0,
+                    )
+                process_only_status = run_cli("status")
+                assert process_only_status.returncode == 0
+                assert "status: live process (pid=" in process_only_status.stdout
+                assert "tunnel health unverified" in process_only_status.stdout
+                assert "working tunnel" not in process_only_status.stdout
+                assert responder.request_count == 2
+            finally:
+                if client_process is not None:
+                    assert certification._stop(client_process)
+                down = run_cli("down")
+                assert down.returncode == 0, down.stdout + down.stderr
+                if responder_started:
+                    assert certification._stop_responder(responder, responder_thread)
+                else:
+                    responder.server_close()
 
     def test_down_kills_process_and_removes_pid(self, workdir: Path, proxy_binary: str) -> None:
         _run_cli("up", workdir, proxy_binary)
