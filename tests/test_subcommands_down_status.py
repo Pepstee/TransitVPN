@@ -542,7 +542,7 @@ class TestStatusLivePidTruthfulness:
         )
 
         assert result.returncode == 0
-        assert f"status: live process (pid={pid})" in result.stdout
-        assert "tunnel health unverified" in result.stdout
+        assert "status: not running; tunnel health unavailable" in result.stdout
+        assert f"live process (pid={pid})" not in result.stdout
         assert "working" not in result.stdout.lower()
         assert "healthy" not in result.stdout.lower()

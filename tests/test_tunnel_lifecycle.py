@@ -19,9 +19,10 @@ import pytest
 from transitvpn import tunnel
 from transitvpn.tunnel import get_status, start_tunnel, stop_tunnel
 
-def _write_test_binary(path: Path, body: str = "exec sleep 30") -> str:
-    # Temporary executable has a distinct lifecycle: it exists only for this test.
-    path.write_text("#!/bin/sh\n" + body + "\n")
+def _write_test_binary(path: Path, body: str = "import time; time.sleep(30)") -> str:
+    # The exact launched script stays in argv; no exec-sleep wrapper can pass
+    # the verified-launch identity check.
+    path.write_text(f"#!{sys.executable}\n" + body + "\n")
     path.chmod(0o700)
     return str(path)
 
@@ -73,26 +74,18 @@ def _dead_pid() -> int:
     return dead
 
 
-def _kill_for_cleanup(state_dir: str) -> None:
-    """Fast SIGKILL + reap for finally-block cleanup.
-
-    Use ONLY in tests that are not testing stop_tunnel behaviour — this
-    bypasses stop_tunnel's graceful shutdown and avoids the 5-second zombie
-    wait that occurs when stop_tunnel is called in-process.
-    """
-    pid_file = Path(state_dir) / "tunnel.pid"
-    if not pid_file.exists():
-        return
+def _signal_test_spawned_process(pid: int, signum: int) -> None:
+    """Signal only the exact test-created incarnation through its pidfd."""
+    pidfd = os.pidfd_open(pid, 0)
     try:
-        pid = int(pid_file.read_text().strip())
-        os.kill(pid, signal.SIGKILL)
-        try:
-            os.waitpid(pid, 0)
-        except ChildProcessError:
-            pass
-    except (ValueError, OSError, ProcessLookupError):
-        pass
-    pid_file.unlink(missing_ok=True)
+        signal.pidfd_send_signal(pidfd, signum)
+    finally:
+        os.close(pidfd)
+
+
+def _kill_for_cleanup(state_dir: str) -> None:
+    """Use the production identity-bound stop path for a test-owned child."""
+    stop_tunnel(state_dir)
 
 
 def _run_cli(cmd: str, workdir: Path, proxy_binary: str) -> subprocess.CompletedProcess:
@@ -155,6 +148,19 @@ def proxy_binary(tmp_path: Path) -> str:
 
 
 class TestStartTunnel:
+    def test_invocation_rejects_verified_path_as_unrelated_argument(
+        self, tmp_path: Path, config_file: str
+    ) -> None:
+        executable = str(Path(_write_test_binary(tmp_path / "proxy")).resolve())
+        interpreter = str(Path(sys.executable).resolve())
+        argv = [interpreter, "-c", "pass", executable, "run", "-config", config_file]
+        assert not tunnel._invocation_matches(
+            executable,
+            str(Path(config_file).resolve()),
+            interpreter,
+            argv,
+        )
+
     def test_returns_pid_and_no_error(
         self, fake_bin: None, config_file: str, state_dir: str
     ) -> None:
@@ -190,7 +196,7 @@ class TestStartTunnel:
         pid, err = start_tunnel(config_file, state_dir)
         try:
             assert err is None
-            stored = int((Path(state_dir) / "tunnel.pid").read_text().strip())
+            stored = json.loads((Path(state_dir) / "tunnel.pid").read_text())["pid"]
             assert stored == pid
         finally:
             _kill_for_cleanup(state_dir)
@@ -266,7 +272,7 @@ class TestStartTunnel:
     ) -> None:
         # A proxy that dies on startup (bad config / port in use) must NOT be
         # reported as a running tunnel.
-        executable = _write_test_binary(tmp_path / "exiting-proxy", "exit 3")
+        executable = _write_test_binary(tmp_path / "exiting-proxy", "raise SystemExit(3)")
         monkeypatch.setattr(tunnel, "verify_binary", lambda binary: (executable, None))
         real_popen = subprocess.Popen
 
@@ -285,6 +291,105 @@ class TestStartTunnel:
         assert not (Path(state_dir) / "tunnel.pid").exists(), (
             "no pid file should remain for a proxy that failed to start"
         )
+
+    def test_identity_mismatch_stops_new_child_and_writes_no_state(
+        self,
+        fake_bin: None,
+        config_file: str,
+        state_dir: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        spawned: list[subprocess.Popen] = []
+        real_popen = subprocess.Popen
+
+        def capture_popen(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            spawned.append(child)
+            return child
+
+        real_identity = tunnel._read_live_identity
+
+        def mismatched_identity(pid: int, pidfd: int):
+            result = real_identity(pid, pidfd)
+            assert result is not None
+            identity, argv = result
+            return identity, [*argv, "unexpected-argument"]
+
+        monkeypatch.setattr(tunnel.subprocess, "Popen", capture_popen)
+        monkeypatch.setattr(tunnel, "_read_live_identity", mismatched_identity)
+        pid, error = start_tunnel(config_file, state_dir)
+        assert pid is None
+        assert error and "did not match the verified invocation" in error
+        assert "stopped safely" in error
+        assert spawned and spawned[0].poll() is not None
+        assert not (Path(state_dir) / "tunnel.pid").exists()
+
+    def test_state_write_failure_stops_child_and_preserves_prior_record(
+        self,
+        fake_bin: None,
+        config_file: str,
+        state_dir: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        prior_pid, prior_error = start_tunnel(config_file, state_dir)
+        assert prior_error is None and prior_pid is not None
+        pid_file = Path(state_dir) / "tunnel.pid"
+        prior_record = pid_file.read_bytes()
+        assert stop_tunnel(state_dir) is None
+        assert _wait_until_dead(prior_pid)
+        pid_file.write_bytes(prior_record)
+
+        spawned: list[subprocess.Popen] = []
+        real_popen = subprocess.Popen
+
+        def capture_popen(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            spawned.append(child)
+            return child
+
+        def fail_write(*_args, **_kwargs):
+            raise OSError("simulated state write failure")
+
+        monkeypatch.setattr(tunnel.subprocess, "Popen", capture_popen)
+        monkeypatch.setattr(tunnel, "_write_record_atomic", fail_write)
+        pid, error = start_tunnel(config_file, state_dir)
+        assert pid is None
+        assert error and "state record could not be saved" in error
+        assert "stopped safely" in error
+        assert spawned and spawned[0].poll() is not None
+        assert pid_file.read_bytes() == prior_record
+
+    def test_pidfd_open_failure_reports_live_untracked_child_truthfully(
+        self,
+        fake_bin: None,
+        config_file: str,
+        state_dir: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        spawned: list[subprocess.Popen] = []
+        real_popen = subprocess.Popen
+
+        def capture_popen(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            spawned.append(child)
+            return child
+
+        def refuse_pidfd(_pid: int, _flags: int):
+            raise PermissionError("simulated pidfd_open denial")
+
+        monkeypatch.setattr(tunnel.subprocess, "Popen", capture_popen)
+        monkeypatch.setattr(tunnel.os, "pidfd_open", refuse_pidfd)
+        pid, error = start_tunnel(config_file, state_dir)
+        try:
+            assert pid is None
+            assert error and "remains alive but untracked" in error
+            assert "no signal was sent" in error
+            assert spawned and spawned[0].poll() is None
+            assert not (Path(state_dir) / "tunnel.pid").exists()
+        finally:
+            if spawned and spawned[0].poll() is None:
+                spawned[0].terminate()
+                spawned[0].wait(timeout=5)
 
     def test_double_start_returns_error(
         self, fake_bin: None, config_file: str, state_dir: str
@@ -314,6 +419,34 @@ class TestStartTunnel:
 
 
 class TestStopTunnel:
+    def test_live_state_transition_with_same_start_ticks_keeps_identity(
+        self,
+        fake_bin: None,
+        config_file: str,
+        state_dir: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pid, error = start_tunnel(config_file, state_dir)
+        assert error is None and pid is not None
+        pidfd = os.pidfd_open(pid, 0)
+        record = json.loads((Path(state_dir) / "tunnel.pid").read_text())
+        real_read_start = tunnel._read_proc_start
+        states = iter([("R", record["start_time_ticks"]), ("S", record["start_time_ticks"])])
+
+        def state_transition(_pid: int):
+            try:
+                return next(states)
+            except StopIteration:
+                return real_read_start(_pid)
+
+        monkeypatch.setattr(tunnel, "_read_proc_start", state_transition)
+        try:
+            assert tunnel._identity_matches(record, pidfd)
+        finally:
+            os.close(pidfd)
+            monkeypatch.setattr(tunnel, "_read_proc_start", real_read_start)
+            assert stop_tunnel(state_dir) is None
+
     def test_stop_kills_the_process(self, fake_bin: None, config_file: str, state_dir: str) -> None:
         pid, err = start_tunnel(config_file, state_dir)
         assert err is None
@@ -334,17 +467,252 @@ class TestStopTunnel:
         Path(state_dir).mkdir(parents=True)
         stop_tunnel(state_dir)
 
-    def test_stop_with_stale_pid_removes_pid_file(self, state_dir: str) -> None:
+    @pytest.mark.parametrize("legacy_pid", ["0", "-17", "not-an-integer"])
+    def test_stop_preserves_untrusted_pid_without_signaling(
+        self,
+        state_dir: str,
+        monkeypatch: pytest.MonkeyPatch,
+        legacy_pid: str,
+    ) -> None:
         Path(state_dir).mkdir(parents=True)
-        (Path(state_dir) / "tunnel.pid").write_text(str(_dead_pid()))
-        stop_tunnel(state_dir)
-        assert not (Path(state_dir) / "tunnel.pid").exists()
+        pid_file = Path(state_dir) / "tunnel.pid"
+        pid_file.write_text(legacy_pid)
+        sends: list[tuple[int, int]] = []
+        monkeypatch.setattr(
+            tunnel.signal,
+            "pidfd_send_signal",
+            lambda pidfd, sig: sends.append((pidfd, sig)),
+        )
+        assert get_status(state_dir) == (False, None)
+        error = stop_tunnel(state_dir)
+        assert error and "refusing to signal" in error
+        assert pid_file.read_text() == legacy_pid
+        assert sends == []
 
-    def test_stop_with_corrupt_pid_file_does_not_raise(self, state_dir: str) -> None:
+    def test_stop_preserves_corrupt_pid_file_without_signaling(
+        self, state_dir: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         Path(state_dir).mkdir(parents=True)
-        (Path(state_dir) / "tunnel.pid").write_text("not-an-integer\n")
-        stop_tunnel(state_dir)
-        assert not (Path(state_dir) / "tunnel.pid").exists()
+        pid_file = Path(state_dir) / "tunnel.pid"
+        pid_file.write_text("{broken\n")
+        sends: list[tuple[int, int]] = []
+        monkeypatch.setattr(
+            tunnel.signal,
+            "pidfd_send_signal",
+            lambda pidfd, sig: sends.append((pidfd, sig)),
+        )
+        error = stop_tunnel(state_dir)
+        assert error and "state preserved" in error
+        assert pid_file.read_text() == "{broken\n"
+        assert sends == []
+
+    def test_unrelated_live_child_is_not_owned_or_signaled(
+        self,
+        state_dir: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        Path(state_dir).mkdir(parents=True)
+        pid_file = Path(state_dir) / "tunnel.pid"
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        sends: list[tuple[int, int]] = []
+        monkeypatch.setattr(
+            tunnel.signal,
+            "pidfd_send_signal",
+            lambda pidfd, sig: sends.append((pidfd, sig)),
+        )
+        try:
+            pid_file.write_text(str(child.pid))
+            assert get_status(state_dir) == (False, None)
+            error = stop_tunnel(state_dir)
+            assert error and "state preserved" in error
+            assert sends == []
+            assert child.poll() is None
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+
+    def test_term_lookup_race_preserves_concurrently_changed_record(
+        self,
+        fake_bin: None,
+        config_file: str,
+        state_dir: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pid, error = start_tunnel(config_file, state_dir)
+        assert error is None and pid is not None
+        pid_file = Path(state_dir) / "tunnel.pid"
+        original_send = signal.pidfd_send_signal
+        pidfd = os.pidfd_open(pid, 0)
+
+        def exit_and_change_record(_pidfd: int, _signum: int) -> None:
+            pid_file.write_text("concurrent-owner-state\n")
+            raise ProcessLookupError
+
+        monkeypatch.setattr(tunnel.signal, "pidfd_send_signal", exit_and_change_record)
+        try:
+            refusal = stop_tunnel(state_dir)
+            assert refusal and "changed concurrently" in refusal
+            assert pid_file.read_text() == "concurrent-owner-state\n"
+        finally:
+            if not tunnel._pidfd_exited(pidfd):
+                original_send(pidfd, signal.SIGKILL)
+            os.close(pidfd)
+
+    def test_kill_lookup_race_preserves_concurrently_changed_record(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        config_file: str,
+        state_dir: str,
+        tmp_path: Path,
+    ) -> None:
+        ready_file = tmp_path / "handler-ready"
+        executable = _write_test_binary(
+            tmp_path / "ignores-term",
+            "import signal, time\n"
+            "from pathlib import Path\n"
+            f"signal.signal(signal.SIGTERM, lambda *_: None)\nPath({str(ready_file)!r}).write_text('ready')\n"
+            "time.sleep(30)",
+        )
+        monkeypatch.setattr(tunnel, "verify_binary", lambda _binary: (executable, None))
+        pid, error = start_tunnel(config_file, state_dir)
+        assert error is None and pid is not None
+        deadline = time.monotonic() + 2.0
+        while not ready_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready_file.exists(), "TERM handler did not become ready"
+        pid_file = Path(state_dir) / "tunnel.pid"
+        pidfd = os.pidfd_open(pid, 0)
+        original_send = signal.pidfd_send_signal
+        monkeypatch.setattr(tunnel, "_STOP_GRACE_SECONDS", 0.0)
+
+        def race_kill(handle: int, signum: int) -> None:
+            if signum == signal.SIGKILL:
+                pid_file.write_text("concurrent-owner-state\n")
+                raise ProcessLookupError
+            original_send(handle, signum)
+
+        monkeypatch.setattr(tunnel.signal, "pidfd_send_signal", race_kill)
+        try:
+            refusal = stop_tunnel(state_dir)
+            assert refusal and "changed concurrently" in refusal
+            assert pid_file.read_text() == "concurrent-owner-state\n"
+        finally:
+            if not tunnel._pidfd_exited(pidfd):
+                original_send(pidfd, signal.SIGKILL)
+            os.close(pidfd)
+
+    def test_reused_pid_with_different_start_time_is_not_signaled(
+        self,
+        fake_bin: None,
+        config_file: str,
+        state_dir: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pid_file = Path(state_dir) / "tunnel.pid"
+        child_pid, error = start_tunnel(config_file, state_dir)
+        assert error is None and child_pid is not None
+        sends: list[tuple[int, int]] = []
+        original_send = signal.pidfd_send_signal
+        monkeypatch.setattr(
+            tunnel.signal,
+            "pidfd_send_signal",
+            lambda pidfd, sig: sends.append((pidfd, sig)),
+        )
+        pidfd = os.pidfd_open(child_pid, 0)
+        try:
+            record = json.loads(pid_file.read_text())
+            record["start_time_ticks"] += 1
+            pid_file.write_text(json.dumps(record))
+            assert get_status(state_dir) == (False, None)
+            error = stop_tunnel(state_dir)
+            assert error and "identity does not match" in error
+            assert sends == []
+        finally:
+            if not tunnel._pidfd_exited(pidfd):
+                original_send(pidfd, signal.SIGKILL)
+            os.close(pidfd)
+            assert _wait_until_dead(child_pid)
+
+    def test_pidfd_pins_original_process_across_pre_signal_replacement(
+        self,
+        fake_bin: None,
+        config_file: str,
+        state_dir: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pid, error = start_tunnel(config_file, state_dir)
+        assert error is None and pid is not None
+        real_send = signal.pidfd_send_signal
+        replacement: subprocess.Popen | None = None
+        requested: list[int] = []
+
+        def replace_before_signal(pidfd: int, signum: int) -> None:
+            nonlocal replacement
+            requested.append(signum)
+            if signum == signal.SIGTERM and replacement is None:
+                # Simulate exit after identity validation but before TERM. The
+                # already-open pidfd remains bound to the original instance.
+                real_send(pidfd, signal.SIGKILL)
+                assert tunnel._wait_pidfd_exit(pidfd, 2.0)
+                replacement = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            real_send(pidfd, signum)
+
+        monkeypatch.setattr(tunnel.signal, "pidfd_send_signal", replace_before_signal)
+        try:
+            assert stop_tunnel(state_dir) is None
+            assert requested == [signal.SIGTERM]
+            assert replacement is not None and replacement.poll() is None
+        finally:
+            if replacement is not None:
+                replacement.terminate()
+                replacement.wait(timeout=5)
+
+    def test_stop_refuses_force_kill_after_process_exec_replacement(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        config_file: str,
+        state_dir: str,
+        tmp_path: Path,
+    ) -> None:
+        executable = _write_test_binary(
+            tmp_path / "exec-on-term",
+            "import os, signal, sys, time\n"
+            "def on_term(_signum, _frame):\n"
+            "    os.execv(sys.executable, [sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+            "signal.signal(signal.SIGTERM, on_term)\n"
+            "time.sleep(30)",
+        )
+        monkeypatch.setattr(tunnel, "verify_binary", lambda _binary: (executable, None))
+        pid, error = start_tunnel(config_file, state_dir)
+        assert error is None and pid is not None
+        pidfd = os.pidfd_open(pid, 0)
+        monkeypatch.setattr(tunnel, "_STOP_GRACE_SECONDS", 0.1)
+        real_send = signal.pidfd_send_signal
+        sent: list[int] = []
+
+        def capture_signals(handle: int, signum: int) -> None:
+            sent.append(signum)
+            real_send(handle, signum)
+
+        monkeypatch.setattr(tunnel.signal, "pidfd_send_signal", capture_signals)
+        pid_file = Path(state_dir) / "tunnel.pid"
+        try:
+            error = stop_tunnel(state_dir)
+            assert error and "identity changed" in error
+            assert sent == [signal.SIGTERM]
+            assert pid_file.exists()
+        finally:
+            if not tunnel._pidfd_exited(pidfd):
+                real_send(pidfd, signal.SIGKILL)
+            os.close(pidfd)
 
     def test_double_stop_is_idempotent(
         self, fake_bin: None, config_file: str, state_dir: str
@@ -455,6 +823,36 @@ class TestTunnelLifecycle:
         stop_tunnel(state_dir)
         assert not (Path(state_dir) / "tunnel.pid").exists()
 
+    def test_real_pinned_xray_owned_lifecycle(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        import uuid
+
+        from transitvpn import xray_certification as certification
+
+        executable, _metadata = certification.verify_binary("xray")
+        server_port = certification._ephemeral_port()
+        socks_port = certification._ephemeral_port()
+        while socks_port == server_port:
+            socks_port = certification._ephemeral_port()
+        configs = certification._configs(server_port, socks_port, str(uuid.uuid4()))
+        certification.validate_configs(configs, binary=executable)
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        server_config = state_dir / "xray-server.json"
+        certification._write_config(server_config, configs["server"])
+        monkeypatch.setenv("TRANSITVPN_PROXY_BIN", executable)
+
+        pid, error = start_tunnel(str(server_config), str(state_dir))
+        try:
+            assert error is None, error
+            assert pid is not None
+            assert get_status(str(state_dir)) == (True, pid)
+        finally:
+            stop_error = stop_tunnel(str(state_dir))
+            assert stop_error is None, stop_error
+        assert _wait_until_dead(pid, timeout=2.0)
+        assert get_status(str(state_dir)) == (False, None)
+
 
 # ---------------------------------------------------------------------------
 # CLI subcommands via real subprocesses with fake proxy
@@ -506,7 +904,10 @@ class TestCLILifecycle:
     ) -> None:
         pid_file = workdir / "state" / "tunnel.pid"
         pid_file.parent.mkdir(parents=True, exist_ok=True)
-        pid_file.write_text(str(_dead_pid()), encoding="utf-8")
+        started = _run_cli("up", workdir, proxy_binary)
+        assert started.returncode == 0, started.stdout + started.stderr
+        record = json.loads(pid_file.read_text(encoding="utf-8"))
+        _signal_test_spawned_process(record["pid"], signal.SIGKILL)
 
         crashed_status = _run_cli("status", workdir, proxy_binary)
         assert crashed_status.returncode == 0
@@ -614,7 +1015,7 @@ class TestCLILifecycle:
                 first_up = run_cli("up")
                 assert first_up.returncode == 0, first_up.stdout + first_up.stderr
                 server_pid_file = state_dir / "tunnel.pid"
-                first_pid = int(server_pid_file.read_text(encoding="utf-8"))
+                first_pid = json.loads(server_pid_file.read_text(encoding="utf-8"))["pid"]
                 wait_server_ready()
 
                 client_process = certification._start(
@@ -635,7 +1036,7 @@ class TestCLILifecycle:
                 ) == len(response_body)
                 assert responder.request_count == 1
 
-                os.kill(first_pid, signal.SIGKILL)
+                _signal_test_spawned_process(first_pid, signal.SIGKILL)
                 crash_deadline = time.monotonic() + 5.0
                 while (
                     get_status(str(state_dir))[0]
@@ -703,10 +1104,19 @@ class TestCLILifecycle:
     def test_down_kills_process_and_removes_pid(self, workdir: Path, proxy_binary: str) -> None:
         _run_cli("up", workdir, proxy_binary)
         pid_file = workdir / "state" / "tunnel.pid"
-        pid = int(pid_file.read_text().strip())
+        pid = json.loads(pid_file.read_text())["pid"]
         _run_cli("down", workdir, proxy_binary)
         assert not pid_file.exists(), "tunnel.pid still present after down"
         assert _wait_until_dead(pid), f"process {pid} still alive after down"
+
+    def test_down_reports_refusal_for_untrusted_state(self, workdir: Path, proxy_binary: str) -> None:
+        pid_file = workdir / "state" / "tunnel.pid"
+        pid_file.write_text("not-a-process-identity\n")
+        result = _run_cli("down", workdir, proxy_binary)
+        assert result.returncode == 1
+        assert "down: error:" in result.stdout
+        assert "tunnel stopped" not in result.stdout
+        assert pid_file.read_text() == "not-a-process-identity\n"
 
     def test_status_returns_not_running_after_down(self, workdir: Path, proxy_binary: str) -> None:
         _run_cli("up", workdir, proxy_binary)

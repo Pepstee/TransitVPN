@@ -150,14 +150,21 @@ def _cmd_up(_args: argparse.Namespace) -> int:
 def _cmd_down(_args: argparse.Namespace) -> int:
     from transitvpn.tunnel import stop_tunnel
 
-    stop_tunnel("state")
+    error = stop_tunnel("state")
+    if error is not None:
+        print(f"down: error: {error}")
+        return 1
     print("down: tunnel stopped")
     return 0
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
-    from transitvpn.tunnel import get_status
+    from transitvpn.tunnel import get_status, lifecycle_support_error
 
+    support_error = lifecycle_support_error()
+    if support_error:
+        print(f"status: unavailable; {support_error}")
+        return 2
     running, pid = get_status("state")
     if running:
         print(f"status: live process (pid={pid}); tunnel health unverified")
