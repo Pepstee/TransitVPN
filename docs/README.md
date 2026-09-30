@@ -83,3 +83,13 @@ artefacts are neither scanned nor transferred. Its child commands inherit that
 source path even when their working directory changes. Historical assertions
 about shell grep ordering are retired: the acceptance launcher now delegates to
 Python, and retained subprocess tests verify the actual down/status behaviour.
+
+## Run the local tunnel certificate
+
+Use `transitvpn certify-local-tunnel [--xray-binary PATH] [--timeout SECONDS]` to run the
+pinned Xray VLESS RAW loopback HTTP check. The command prints a credential-free JSON record and
+returns success only when the local request traverses the tunnel. `--xray-binary` defaults to
+`TRANSITVPN_XRAY_BIN` or `xray`; the timeout defaults to 10 seconds.
+
+This verifies only the local loopback path. It does not prove public REALITY reachability, remote
+DNS behaviour, or Beijing reachability. External recovery remains unprovisioned.

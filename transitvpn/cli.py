@@ -29,6 +29,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
+    certify_p = subparsers.add_parser(
+        "certify-local-tunnel",
+        help="Certify the pinned Xray loopback VLESS RAW data path",
+    )
+    certify_p.add_argument(
+        "--xray-binary",
+        default=os.environ.get("TRANSITVPN_XRAY_BIN", "xray"),
+        help="Path to the pinned Xray executable",
+    )
+    certify_p.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        metavar="SECONDS",
+        help="Timeout in seconds for the local certification run (default: 10)",
+    )
+
     subparsers.add_parser("up", help="Bring up the VPN tunnel")
     subparsers.add_parser("down", help="Tear down the VPN tunnel")
     subparsers.add_parser("status", help="Show tunnel status")
@@ -100,6 +117,24 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_certify_local_tunnel(args: argparse.Namespace) -> int:
+    from transitvpn.xray import certify_local_tunnel
+
+    if not (args.timeout > 0.0) or args.timeout == float("inf"):
+        print("certify-local-tunnel: error: --timeout must be a positive finite number",
+              file=sys.stderr)
+        return 2
+
+    try:
+        result = certify_local_tunnel(args.xray_binary, timeout=args.timeout)
+    except (RuntimeError, ValueError, OSError) as exc:
+        print(f"certify-local-tunnel: error: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(result.operator_record(), indent=2))
+    return 0
+
+
 def _cmd_up(_args: argparse.Namespace) -> int:
     from transitvpn.tunnel import start_tunnel
 
@@ -138,6 +173,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
+
+    if args.command == "certify-local-tunnel":
+        return _cmd_certify_local_tunnel(args)
 
     if args.command == "up":
         return _cmd_up(args)
