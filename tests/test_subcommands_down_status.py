@@ -14,6 +14,7 @@ Coverage:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -520,3 +521,28 @@ class TestStubSymmetry:
         result = _run_module(cmd)
         # At minimum the nominal case (no extra args) must exit 0
         assert result.returncode == 0
+
+
+class TestStatusLivePidTruthfulness:
+    def test_live_arbitrary_pid_does_not_claim_a_working_tunnel(
+        self, tmp_path: Path
+    ) -> None:
+        state = tmp_path / "state"
+        state.mkdir()
+        pid = os.getpid()
+        (state / "tunnel.pid").write_text(str(pid), encoding="ascii")
+
+        result = subprocess.run(
+            [sys.executable, "-m", "transitvpn", "status"],
+            capture_output=True,
+            text=True,
+            cwd=str(tmp_path),
+            env={**os.environ, "PYTHONPATH": str(_REPO)},
+            timeout=10,
+        )
+
+        assert result.returncode == 0
+        assert f"status: live process (pid={pid})" in result.stdout
+        assert "tunnel health unverified" in result.stdout
+        assert "working" not in result.stdout.lower()
+        assert "healthy" not in result.stdout.lower()

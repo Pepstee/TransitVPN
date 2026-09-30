@@ -160,9 +160,9 @@ def _cmd_status(_args: argparse.Namespace) -> int:
 
     running, pid = get_status("state")
     if running:
-        print(f"status: running (pid={pid})")
+        print(f"status: live process (pid={pid}); tunnel health unverified")
     else:
-        print("status: not running")
+        print("status: not running; tunnel health unavailable")
     return 0
 
 
