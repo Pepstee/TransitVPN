@@ -86,6 +86,45 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
 
         self.assertIn("tunnel probe failed", str(raised.exception))
 
+    def test_wrong_vless_credential_never_reaches_http_responder(self) -> None:
+        try:
+            executable, _ = xray.verify_binary()
+        except RuntimeError as exc:
+            self.skipTest(f"pinned Xray binary is unavailable: {exc}")
+
+        body_secret = secrets.token_hex(24)
+        server_credential = uuid.uuid4()
+        wrong_client_credential = uuid.uuid4()
+        self.assertNotEqual(server_credential, wrong_client_credential)
+        responders: list[certification._Responder] = []
+        responder_type = certification._Responder
+
+        def capture_responder(*args: object, **kwargs: object) -> certification._Responder:
+            responder = responder_type(*args, **kwargs)
+            responders.append(responder)
+            return responder
+
+        with (
+            mock.patch.object(certification.secrets, "token_hex", return_value=body_secret),
+            mock.patch.object(
+                certification.uuid,
+                "uuid4",
+                side_effect=[server_credential, wrong_client_credential],
+            ),
+            mock.patch.object(certification, "_Responder", side_effect=capture_responder),
+        ):
+            with self.assertRaises(certification.XrayCertificationError):
+                certification.certify_local_tunnel(
+                    executable, timeout=10.0, credential_mismatch=True
+                )
+
+        self.assertEqual(len(responders), 1)
+        self.assertEqual(responders[0].request_count, 0)
+        _assert_absent_from_repository(
+            self,
+            (body_secret, str(server_credential), str(wrong_client_credential)),
+        )
+
     def test_generated_credentials_exist_only_in_a_cleaned_temporary_fixture(self) -> None:
         client_secret = str(uuid.uuid4())
         response_secret = secrets.token_hex(24)

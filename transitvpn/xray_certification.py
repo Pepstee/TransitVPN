@@ -55,13 +55,25 @@ class _Responder(ThreadingHTTPServer):
 
     def __init__(self, body: bytes) -> None:
         self.response_body = body
+        self._request_count = 0
+        self._request_count_lock = threading.Lock()
         super().__init__((_LOOPBACK, 0), _RequestHandler)
+
+    @property
+    def request_count(self) -> int:
+        with self._request_count_lock:
+            return self._request_count
+
+    def record_request(self) -> None:
+        with self._request_count_lock:
+            self._request_count += 1
 
 
 class _RequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self.server.record_request()  # type: ignore[attr-defined]
         body = self.server.response_body  # type: ignore[attr-defined]
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
@@ -84,7 +96,12 @@ def _ephemeral_port() -> int:
 
 
 def _configs(
-    server_port: int, socks_port: int, client_id: str, *, responder_port: int | None = None
+    server_port: int,
+    socks_port: int,
+    client_id: str,
+    *,
+    responder_port: int | None = None,
+    credential_mismatch: bool = False,
 ) -> dict[str, dict[str, Any]]:
     common_log = {"loglevel": "none"}
     server = {
@@ -111,6 +128,7 @@ def _configs(
                 "ip": [_LOOPBACK + "/32"], "port": str(responder_port),
             }],
         }
+    outbound_client_id = str(uuid.uuid4()) if credential_mismatch else client_id
     client = {
         "log": common_log,
         "inbounds": [{
@@ -124,7 +142,7 @@ def _configs(
             "settings": {"vnext": [{
                 "address": _LOOPBACK,
                 "port": server_port,
-                "users": [{"id": client_id, "encryption": "none"}],
+                "users": [{"id": outbound_client_id, "encryption": "none"}],
             }]},
             "streamSettings": {"network": "raw", "security": "none"},
         }],
@@ -279,7 +297,10 @@ def _stop_responder(responder: socketserver.TCPServer, thread: threading.Thread)
 
 
 def certify_local_tunnel(
-    xray_binary: str = "xray", *, timeout: float = 10.0
+    xray_binary: str = "xray",
+    *,
+    timeout: float = 10.0,
+    credential_mismatch: bool = False,
 ) -> XrayTunnelCertification:
     """Prove HTTP bytes traverse a local SOCKS -> Xray -> HTTP path.
 
@@ -319,6 +340,7 @@ def certify_local_tunnel(
             configs = _configs(
                 server_port, socks_port, str(uuid.uuid4()),
                 responder_port=int(responder.server_address[1]),
+                credential_mismatch=credential_mismatch,
             )
         except (TypeError, ValueError) as exc:
             raise XrayCertificationError("generated Xray configuration could not be created") from exc
