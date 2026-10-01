@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import json
 import math
 from pathlib import Path
@@ -16,6 +17,7 @@ import threading
 import time
 import uuid
 from typing import Any
+from urllib.parse import quote, urlsplit
 
 from transitvpn.xray import XRAY_VERSION, validate_configs, verify_binary
 
@@ -25,6 +27,15 @@ _LOOPBACK = "127.0.0.1"
 
 class XrayCertificationError(RuntimeError):
     """A closed failure of the local Xray tunnel certification."""
+
+
+class XrayHTTPProbeError(XrayCertificationError):
+    """An HTTP response was observed but its framing was invalid or incomplete."""
+
+    def __init__(self, message: str, *, status_code: int, response_bytes: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_bytes = response_bytes
 
 
 @dataclass(frozen=True)
@@ -47,6 +58,25 @@ class XrayTunnelCertification:
                 "cleanup": "observed",
             },
             "external_recovery": {"status": "unprovisioned", "observed": False},
+        }
+
+
+@dataclass(frozen=True)
+class SocksHTTPObservation:
+    """Credential-free result of one HTTP request sent only through SOCKS."""
+
+    status_code: int
+    response_bytes: int
+
+    def operator_record(self) -> dict[str, object]:
+        healthy = 200 <= self.status_code < 300
+        return {
+            "health": "healthy" if healthy else "unhealthy",
+            "http_observed": True,
+            "http_status": self.status_code,
+            "response_bytes": self.response_bytes,
+            "route": "configured_socks",
+            "process_liveness": "not_checked",
         }
 
 
@@ -205,24 +235,44 @@ def _receive_exact(connection: socket.socket, count: int, deadline: float | None
     return bytes(data)
 
 
-def _probe(socks_port: int, upstream_port: int, expected_body: bytes, timeout: float) -> int:
+def _http_request_over_socks(
+    socks_host: str,
+    socks_port: int,
+    target_host: str,
+    target_port: int,
+    request_target: str,
+    host_header: str,
+    timeout: float,
+    *,
+    target_label: str,
+) -> tuple[int, bytes]:
     deadline = time.monotonic() + timeout
     try:
-        with socket.create_connection((_LOOPBACK, socks_port), timeout=timeout) as connection:
+        with socket.create_connection((socks_host, socks_port), timeout=timeout) as connection:
             _set_remaining_timeout(connection, deadline)
             connection.sendall(b"\x05\x01\x00")
             if _receive_exact(connection, 2, deadline) != b"\x05\x00":
                 raise XrayCertificationError("client SOCKS endpoint rejected no-auth negotiation")
 
-            # Domain-form SOCKS establishes proxy-side DNS handling as well as
-            # routing; an IP-form request cannot support a DNS assertion.
-            hostname = b"localhost"
-            request = b"\x05\x01\x00\x03" + bytes((len(hostname),)) + hostname
-            request += upstream_port.to_bytes(2, "big")
+            try:
+                address = ipaddress.ip_address(target_host)
+            except ValueError:
+                try:
+                    hostname = target_host.encode("idna")
+                except UnicodeError as exc:
+                    raise XrayCertificationError("HTTP target hostname is invalid") from exc
+                if not hostname or len(hostname) > 255:
+                    raise XrayCertificationError("HTTP target hostname is invalid")
+                address_type = b"\x03" + bytes((len(hostname),)) + hostname
+            else:
+                address_type = (b"\x01" if address.version == 4 else b"\x04") + address.packed
+            request = b"\x05\x01\x00" + address_type + target_port.to_bytes(2, "big")
             connection.sendall(request)
             reply = _receive_exact(connection, 4, deadline)
             if reply[0] != 5 or reply[1] != 0:
-                raise XrayCertificationError("client SOCKS endpoint could not reach the responder")
+                raise XrayCertificationError(
+                    f"client SOCKS endpoint could not reach the {target_label}"
+                )
             address_size = {1: 4, 4: 16}.get(reply[3])
             if reply[3] == 3:
                 address_size = _receive_exact(connection, 1, deadline)[0]
@@ -231,13 +281,16 @@ def _probe(socks_port: int, upstream_port: int, expected_body: bytes, timeout: f
             _receive_exact(connection, address_size + 2, deadline)
 
             _set_remaining_timeout(connection, deadline)
-            connection.sendall(b"GET /certify HTTP/1.0\r\nHost: local\r\n\r\n")
+            request_line = f"GET {request_target} HTTP/1.0\r\nHost: {host_header}\r\nConnection: close\r\n\r\n"
+            connection.sendall(request_line.encode("ascii"))
             response = bytearray()
             while True:
                 _set_remaining_timeout(connection, deadline)
                 chunk = connection.recv(4096)
                 if not chunk:
                     break
+                if len(response) + len(chunk) > 1_048_576:
+                    raise XrayCertificationError("HTTP health response exceeded the bounded size")
                 response.extend(chunk)
     except XrayCertificationError:
         raise
@@ -245,7 +298,199 @@ def _probe(socks_port: int, upstream_port: int, expected_body: bytes, timeout: f
         raise XrayCertificationError("application-data tunnel probe failed") from exc
 
     header, separator, body = bytes(response).partition(b"\r\n\r\n")
-    if not separator or not header.startswith(b"HTTP/1.0 200 ") or body != expected_body:
+    if not separator:
+        raise XrayCertificationError("application-data tunnel probe returned an invalid response")
+    status_line = header.split(b"\r\n", 1)[0].split()
+    if (
+        len(status_line) < 2
+        or status_line[0] not in {b"HTTP/1.0", b"HTTP/1.1"}
+        or len(status_line[1]) != 3
+        or not status_line[1].isdigit()
+    ):
+        raise XrayCertificationError("application-data tunnel probe returned an invalid response")
+    status = int(status_line[1])
+    headers: dict[bytes, bytes] = {}
+    for line in header.split(b"\r\n")[1:]:
+        name, separator, value = line.partition(b":")
+        if not separator or not name or any(ch <= 32 or ch >= 127 for ch in name):
+            raise XrayCertificationError("HTTP health response returned invalid headers")
+        key = name.lower()
+        value = value.strip()
+        previous = headers.get(key)
+        if previous is not None and previous != value:
+            raise XrayCertificationError("HTTP health response returned conflicting headers")
+        headers[key] = value
+
+    content_length = headers.get(b"content-length")
+    transfer_encoding = headers.get(b"transfer-encoding")
+    if content_length is not None and transfer_encoding is not None:
+        raise XrayCertificationError("HTTP health response has ambiguous body framing")
+    if transfer_encoding is not None:
+        codings = [part.strip().lower() for part in transfer_encoding.split(b",")]
+        if codings != [b"chunked"]:
+            raise XrayCertificationError("HTTP health response uses unsupported body framing")
+        try:
+            body = _decode_chunked_body(body)
+        except XrayCertificationError as exc:
+            raise XrayHTTPProbeError(
+                str(exc), status_code=status, response_bytes=0
+            ) from exc
+    elif content_length is not None:
+        if (
+            not content_length.isdigit()
+            or len(content_length) > 7
+            or len(body) != int(content_length)
+        ):
+            raise XrayHTTPProbeError(
+                "HTTP health response body is incomplete",
+                status_code=status,
+                response_bytes=len(body),
+            )
+    return status, bytes(body)
+
+
+def _decode_chunked_body(body: bytes) -> bytes:
+    result = bytearray()
+    cursor = 0
+    while True:
+        line_end = body.find(b"\r\n", cursor)
+        if line_end < 0:
+            raise XrayCertificationError("HTTP health response chunk framing is incomplete")
+        size_text = body[cursor:line_end].split(b";", 1)[0].strip()
+        if not size_text or any(ch not in b"0123456789abcdefABCDEF" for ch in size_text):
+            raise XrayCertificationError("HTTP health response has invalid chunk framing")
+        if len(size_text) > 8:
+            raise XrayCertificationError("HTTP health response chunk exceeds the bounded size")
+        size = int(size_text, 16)
+        cursor = line_end + 2
+        if size == 0:
+            trailer_end = body.find(b"\r\n\r\n", cursor)
+            if body[cursor:] == b"\r\n":
+                return bytes(result)
+            if trailer_end < 0 or trailer_end + 4 != len(body):
+                raise XrayCertificationError("HTTP health response chunk framing is incomplete")
+            trailer_lines = body[cursor:trailer_end].split(b"\r\n")
+            if any(b":" not in line for line in trailer_lines):
+                raise XrayCertificationError("HTTP health response has invalid chunk trailers")
+            return bytes(result)
+        chunk_end = cursor + size
+        if chunk_end + 2 > len(body) or body[chunk_end:chunk_end + 2] != b"\r\n":
+            raise XrayCertificationError("HTTP health response chunk framing is incomplete")
+        result.extend(body[cursor:chunk_end])
+        if len(result) > 1_048_576:
+            raise XrayCertificationError("HTTP health response exceeded the bounded size")
+        cursor = chunk_end + 2
+
+
+def _configured_socks_inbound(client_config_path: str | Path) -> tuple[str, int]:
+    try:
+        config = json.loads(Path(client_config_path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise XrayCertificationError("configured Xray client settings are unavailable") from exc
+    if not isinstance(config, dict) or not isinstance(config.get("inbounds"), list):
+        raise XrayCertificationError("configured Xray client settings are invalid")
+    inbounds = [x for x in config["inbounds"] if isinstance(x, dict) and x.get("protocol") == "socks"]
+    if len(inbounds) != 1:
+        raise XrayCertificationError("configured Xray client must have exactly one SOCKS inbound")
+    inbound = inbounds[0]
+    listen = inbound.get("listen")
+    port = inbound.get("port")
+    if not isinstance(listen, str):
+        raise XrayCertificationError("configured SOCKS inbound must listen on loopback")
+    try:
+        address = ipaddress.ip_address(listen)
+    except ValueError as exc:
+        raise XrayCertificationError("configured SOCKS inbound must listen on loopback") from exc
+    if not address.is_loopback:
+        raise XrayCertificationError("configured SOCKS inbound must listen on loopback")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise XrayCertificationError("configured SOCKS inbound has an invalid port")
+    return str(address), port
+
+
+def probe_configured_socks_http(
+    client_config_path: str | Path,
+    url: str,
+    *,
+    timeout: float = 5.0,
+) -> SocksHTTPObservation:
+    """Observe an HTTP response through the configured loopback SOCKS client.
+
+    Only the local SOCKS listener is connected to directly. The target host is
+    carried in the SOCKS CONNECT request so its DNS and route stay behind Xray.
+    Process liveness is deliberately not consulted.
+    """
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+        or timeout > 30
+    ):
+        raise ValueError("timeout must be positive, finite, and at most 30 seconds")
+    if (
+        not isinstance(url, str)
+        or not url
+        or len(url) > 8192
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in url)
+    ):
+        raise ValueError("URL is invalid")
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port if parsed.port is not None else 80
+    except ValueError as exc:
+        raise ValueError("URL is invalid") from exc
+    if parsed.scheme.lower() != "http" or parsed.username is not None or parsed.password is not None:
+        raise ValueError("health URL must be plain HTTP without user information")
+    if parsed.fragment or not parsed.hostname:
+        raise ValueError("health URL must include a host and no fragment")
+    if not 1 <= port <= 65535:
+        raise ValueError("health URL port is invalid")
+    target_host = parsed.hostname
+    try:
+        host_ascii = target_host.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ValueError("health URL host is invalid") from exc
+    try:
+        host_ip = ipaddress.ip_address(target_host)
+    except ValueError:
+        host_header = host_ascii
+    else:
+        host_header = f"[{host_ascii}]" if host_ip.version == 6 else host_ascii
+    if parsed.port is not None:
+        host_header += f":{port}"
+    request_target = parsed.path or "/"
+    if parsed.query:
+        request_target += "?" + parsed.query
+    if any(ch in request_target for ch in "\r\n"):
+        raise ValueError("health URL path is invalid")
+    request_target = quote(request_target, safe="/%?:@!$&'()*+,;=-._~")
+    socks_host, socks_port = _configured_socks_inbound(client_config_path)
+    status, body = _http_request_over_socks(
+        socks_host,
+        socks_port,
+        target_host,
+        port,
+        request_target,
+        host_header,
+        timeout,
+        target_label="health target",
+    )
+    return SocksHTTPObservation(status_code=status, response_bytes=len(body))
+
+
+def _probe(socks_port: int, upstream_port: int, expected_body: bytes, timeout: float) -> int:
+    status, body = _http_request_over_socks(
+        _LOOPBACK,
+        socks_port,
+        "localhost",
+        upstream_port,
+        "/certify",
+        "local",
+        timeout,
+        target_label="the responder",
+    )
+    if status != 200 or body != expected_body:
         raise XrayCertificationError("application-data tunnel probe returned an invalid response")
     return len(body)
 

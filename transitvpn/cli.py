@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import os
 import sys
 import tempfile
@@ -49,6 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("up", help="Bring up the VPN tunnel")
     subparsers.add_parser("down", help="Tear down the VPN tunnel")
     subparsers.add_parser("status", help="Show tunnel status")
+
+    health_p = subparsers.add_parser(
+        "health", help="Request HTTP health through the configured local SOCKS tunnel"
+    )
+    health_p.add_argument("--url", required=True, help="Plain HTTP health URL to request through Xray")
+    health_p.add_argument(
+        "--timeout", type=float, default=5.0, metavar="SECONDS",
+        help="Request timeout in seconds (default: 5; maximum: 30)",
+    )
 
     bootstrap_p = subparsers.add_parser(
         "bootstrap", help="Generate and validate matching Xray server/client configs"
@@ -173,6 +183,43 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_health(args: argparse.Namespace) -> int:
+    from transitvpn.xray_certification import (
+        XrayCertificationError,
+        probe_configured_socks_http,
+    )
+
+    if not math.isfinite(args.timeout) or not 0.0 < args.timeout <= 30.0:
+        print("health: error: --timeout must be positive, finite, and at most 30 seconds",
+              file=sys.stderr)
+        return 2
+
+    try:
+        observation = probe_configured_socks_http(
+            Path("state") / "xray-client.json", args.url, timeout=args.timeout
+        )
+    except ValueError as exc:
+        print(f"health: error: {exc}", file=sys.stderr)
+        return 2
+    except XrayCertificationError as exc:
+        record: dict[str, object] = {
+            "health": "unhealthy",
+            "http_observed": hasattr(exc, "status_code"),
+            "route": "configured_socks",
+            "process_liveness": "not_checked",
+            "error": str(exc),
+        }
+        if hasattr(exc, "status_code"):
+            record["http_status"] = exc.status_code
+            record["response_bytes"] = exc.response_bytes
+        print(json.dumps(record, indent=2))
+        return 1
+
+    record = observation.operator_record()
+    print(json.dumps(record, indent=2))
+    return 0 if record["health"] == "healthy" else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -192,6 +239,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "status":
         return _cmd_status(args)
+
+    if args.command == "health":
+        return _cmd_health(args)
 
     if args.command == "bootstrap":
         return _cmd_bootstrap(args)
