@@ -211,6 +211,20 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
         )
 
     def test_wrong_reality_short_id_uses_only_loopback_fallback(self) -> None:
+        self._assert_wrong_reality_mismatch_uses_only_loopback_fallback("short-id")
+
+    def test_wrong_reality_public_key_uses_only_loopback_fallback(self) -> None:
+        self._assert_wrong_reality_mismatch_uses_only_loopback_fallback("public-key")
+
+    def _assert_wrong_reality_mismatch_uses_only_loopback_fallback(
+        self, mismatch_kind: str
+    ) -> None:
+        if mismatch_kind == "short-id":
+            mismatch_field, mismatch_label = "shortId", "short-ID"
+        elif mismatch_kind == "public-key":
+            mismatch_field, mismatch_label = "publicKey", "public-key"
+        else:
+            raise ValueError(f"unsupported REALITY mismatch kind: {mismatch_kind}")
         try:
             executable, metadata = xray.verify_binary()
         except RuntimeError as exc:
@@ -219,6 +233,10 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
         body_secret = secrets.token_hex(24)
         body = ("transitvpn-reality-certification:" + body_secret).encode("ascii")
         keys = generate_keys()
+        keys_to_scan = [
+            keys.vless_uuid, keys.reality_private_key,
+            keys.reality_public_key, keys.ss_password,
+        ]
         server_short_id = generate_short_id()
         wrong_short_id = (
             "1" if server_short_id[0] == "0" else "0"
@@ -240,7 +258,7 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
             root = Path(directory)
             server_path = root / "server.json"
             matching_client_path = root / "client-matching.json"
-            wrong_client_path = root / "client-wrong-short-id.json"
+            wrong_client_path = root / f"client-wrong-{mismatch_kind}.json"
             server_process = None
             client_process = None
             try:
@@ -310,10 +328,32 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
                         },
                     ],
                 }
+                if mismatch_kind == "short-id":
+                    wrong_deployment = replace(deployment, short_id=wrong_short_id)
+                else:
+                    mismatched_keys = generate_keys()
+                    self.assertNotEqual(
+                        keys.reality_public_key, mismatched_keys.reality_public_key
+                    )
+                    keys_to_scan.extend((
+                        mismatched_keys.vless_uuid, mismatched_keys.reality_private_key,
+                        mismatched_keys.reality_public_key, mismatched_keys.ss_password,
+                    ))
+                    wrong_deployment = replace(
+                        deployment,
+                        keys=replace(
+                            deployment.keys,
+                            reality_public_key=mismatched_keys.reality_public_key,
+                        ),
+                    )
+                    self.assertEqual(wrong_deployment.keys.vless_uuid, deployment.keys.vless_uuid)
+                    self.assertEqual(
+                        wrong_deployment.keys.reality_private_key,
+                        deployment.keys.reality_private_key,
+                    )
+                    self.assertEqual(wrong_deployment.short_id, deployment.short_id)
                 matching_client_config = build_client_config(deployment)
-                wrong_client_config = build_client_config(
-                    replace(deployment, short_id=wrong_short_id)
-                )
+                wrong_client_config = build_client_config(wrong_deployment)
 
                 validation = xray.validate_configs(
                     {
@@ -335,11 +375,24 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
                     "realitySettings"
                 ]
                 self.assertEqual(server_reality["shortIds"], [server_short_id])
-                self.assertNotIn(wrong_short_id, server_reality["shortIds"])
                 self.assertEqual(matching_reality["shortId"], server_short_id)
-                self.assertEqual(wrong_reality["shortId"], wrong_short_id)
                 self.assertEqual(server_reality["serverNames"], [server_name])
                 self.assertEqual(matching_reality["serverName"], server_name)
+                if mismatch_kind == "short-id":
+                    self.assertNotIn(wrong_short_id, server_reality["shortIds"])
+                    self.assertEqual(wrong_reality["shortId"], wrong_short_id)
+                else:
+                    self.assertEqual(wrong_reality["shortId"], server_short_id)
+                    self.assertEqual(matching_reality["publicKey"], keys.reality_public_key)
+                    self.assertEqual(
+                        wrong_reality["publicKey"], mismatched_keys.reality_public_key
+                    )
+                normalized_wrong_config = json.loads(json.dumps(wrong_client_config))
+                normalized_reality = normalized_wrong_config["outbounds"][0][
+                    "streamSettings"
+                ]["realitySettings"]
+                normalized_reality[mismatch_field] = matching_reality[mismatch_field]
+                self.assertEqual(normalized_wrong_config, matching_client_config)
 
                 certification._write_config(server_path, server_config)
                 certification._write_config(matching_client_path, matching_client_config)
@@ -370,8 +423,8 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
                 self.assertTrue(certification._stop(client_process))
                 client_process = None
 
-                target_connections_before_wrong_id = target.connection_count
-                responder_requests_before_wrong_id = responder.request_count
+                target_connections_before_mismatch = target.connection_count
+                responder_requests_before_mismatch = responder.request_count
                 client_process = certification._start(
                     executable, wrong_client_path, "client"
                 )
@@ -387,10 +440,10 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
                     )
                 self.assertNotIn("timed out", str(raised.exception).lower())
                 self.assertGreater(
-                    target.connection_count, target_connections_before_wrong_id
+                    target.connection_count, target_connections_before_mismatch
                 )
                 self.assertEqual(
-                    responder.request_count, responder_requests_before_wrong_id
+                    responder.request_count, responder_requests_before_mismatch
                 )
                 self.assertIsNone(server_process.poll())
                 self.assertIsNone(client_process.poll())
@@ -415,17 +468,14 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
                             cleanup_failed = True
                 if cleanup_failed:
                     raise certification.XrayCertificationError(
-                        "REALITY short-ID test cleanup could not be confirmed"
+                        f"REALITY {mismatch_label} mismatch test cleanup could not be confirmed"
                     )
 
         _assert_absent_from_repository(
             self,
             (
                 body_secret,
-                keys.vless_uuid,
-                keys.reality_private_key,
-                keys.reality_public_key,
-                keys.ss_password,
+                *keys_to_scan,
                 server_short_id,
                 wrong_short_id,
             ),
