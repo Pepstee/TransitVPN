@@ -112,8 +112,11 @@ def _assert_absent_from_repository(test: unittest.TestCase, values: tuple[str, .
             contents = candidate.read_bytes()
         except OSError:
             continue
-        for value, needle in zip(values, needles):
-            test.assertNotIn(needle, contents, f"temporary secret leaked to {candidate}: {value}")
+        for needle in needles:
+            test.assertTrue(
+                needle not in contents,
+                "temporary secret leaked into repository",
+            )
 
 
 class LocalXrayTunnelCertificationTests(unittest.TestCase):
@@ -332,8 +335,9 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
                     wrong_deployment = replace(deployment, short_id=wrong_short_id)
                 else:
                     mismatched_keys = generate_keys()
-                    self.assertNotEqual(
-                        keys.reality_public_key, mismatched_keys.reality_public_key
+                    self.assertTrue(
+                        keys.reality_public_key != mismatched_keys.reality_public_key,
+                        "mismatched REALITY public-key fixture must differ",
                     )
                     keys_to_scan.extend((
                         mismatched_keys.vless_uuid, mismatched_keys.reality_private_key,
@@ -346,12 +350,19 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
                             reality_public_key=mismatched_keys.reality_public_key,
                         ),
                     )
-                    self.assertEqual(wrong_deployment.keys.vless_uuid, deployment.keys.vless_uuid)
-                    self.assertEqual(
-                        wrong_deployment.keys.reality_private_key,
-                        deployment.keys.reality_private_key,
+                    self.assertTrue(
+                        wrong_deployment.keys.vless_uuid == deployment.keys.vless_uuid,
+                        "wrong-key fixture changed the VLESS UUID",
                     )
-                    self.assertEqual(wrong_deployment.short_id, deployment.short_id)
+                    self.assertTrue(
+                        wrong_deployment.keys.reality_private_key
+                        == deployment.keys.reality_private_key,
+                        "wrong-key fixture changed the REALITY private key",
+                    )
+                    self.assertTrue(
+                        wrong_deployment.short_id == deployment.short_id,
+                        "wrong-key fixture changed the REALITY short ID",
+                    )
                 matching_client_config = build_client_config(deployment)
                 wrong_client_config = build_client_config(wrong_deployment)
 
@@ -374,25 +385,47 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
                 wrong_reality = wrong_client_config["outbounds"][0]["streamSettings"][
                     "realitySettings"
                 ]
-                self.assertEqual(server_reality["shortIds"], [server_short_id])
-                self.assertEqual(matching_reality["shortId"], server_short_id)
+                self.assertTrue(
+                    server_reality["shortIds"] == [server_short_id],
+                    "server REALITY short-ID configuration mismatch",
+                )
+                self.assertTrue(
+                    matching_reality["shortId"] == server_short_id,
+                    "matching client REALITY short-ID configuration mismatch",
+                )
                 self.assertEqual(server_reality["serverNames"], [server_name])
                 self.assertEqual(matching_reality["serverName"], server_name)
                 if mismatch_kind == "short-id":
-                    self.assertNotIn(wrong_short_id, server_reality["shortIds"])
-                    self.assertEqual(wrong_reality["shortId"], wrong_short_id)
+                    self.assertTrue(
+                        wrong_short_id not in server_reality["shortIds"],
+                        "server unexpectedly contains the mismatched short ID",
+                    )
+                    self.assertTrue(
+                        wrong_reality["shortId"] == wrong_short_id,
+                        "wrong client REALITY short-ID configuration mismatch",
+                    )
                 else:
-                    self.assertEqual(wrong_reality["shortId"], server_short_id)
-                    self.assertEqual(matching_reality["publicKey"], keys.reality_public_key)
-                    self.assertEqual(
-                        wrong_reality["publicKey"], mismatched_keys.reality_public_key
+                    self.assertTrue(
+                        wrong_reality["shortId"] == server_short_id,
+                        "wrong-key client changed the REALITY short ID",
+                    )
+                    self.assertTrue(
+                        matching_reality["publicKey"] == keys.reality_public_key,
+                        "matching client REALITY public-key configuration mismatch",
+                    )
+                    self.assertTrue(
+                        wrong_reality["publicKey"] == mismatched_keys.reality_public_key,
+                        "wrong client REALITY public-key configuration mismatch",
                     )
                 normalized_wrong_config = json.loads(json.dumps(wrong_client_config))
                 normalized_reality = normalized_wrong_config["outbounds"][0][
                     "streamSettings"
                 ]["realitySettings"]
                 normalized_reality[mismatch_field] = matching_reality[mismatch_field]
-                self.assertEqual(normalized_wrong_config, matching_client_config)
+                self.assertTrue(
+                    normalized_wrong_config == matching_client_config,
+                    "client configs differ outside the selected REALITY mismatch field",
+                )
 
                 certification._write_config(server_path, server_config)
                 certification._write_config(matching_client_path, matching_client_config)
