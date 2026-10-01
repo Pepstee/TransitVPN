@@ -57,9 +57,68 @@ longer needed. The URI does not encode custom DNS, routing, or application polic
 in the receiving client; this export does not establish DNS leak protection or prove that a Mac or
 phone application imported the profile successfully.
 
+## Import a client profile
+
+On the machine that should run the tunnel client, import an exported profile through the
+product's own user-facing route:
+
+```console
+umask 077
+mkdir -m 700 client-work
+cd client-work
+transitvpn import-profile --input /secure/channel/client.vless --socks-port 10808
+```
+
+Import reads one regular profile file (`--input`, mode 0600, no final-component symlink). The
+implementation does not enforce private permissions on the input's parent directory. It
+strictly accepts only the exact VLESS RAW/TCP REALITY share format produced by
+`export-profile`: the fixed `security=reality`, `encryption=none`, `type=tcp` transport plus the
+UUID, REALITY public key, SNI, fingerprint, short ID and the supported flow. Duplicate, unknown
+or malformed fields, any unsupported transport, and arbitrary third-party share formats are
+refused with a fixed generic error. The credential-bearing URI is never accepted on the command
+line and never printed or logged.
+
+The command reconstructs the client configuration, validates it with the pinned Xray binary
+(`--xray-binary`, default `TRANSITVPN_XRAY_BIN` or `xray`), and writes it privately as
+`state/xray-client.json` (mode 0600) with a loopback-only SOCKS listener on `--socks-port`
+(default 10808) and exactly one proxy outbound; there is no direct fallback outbound. An
+existing `state/xray-client.json` is never silently overwritten — remove or archive it
+deliberately first. The input profile file is not modified.
+
+## Managed client lifecycle
+
+The server and the imported client are two managed roles with separate state:
+
+```console
+transitvpn up              # start the server tunnel from state/xray-server.json
+transitvpn up --client     # start the client tunnel from state/xray-client.json
+transitvpn status          # server process status
+transitvpn status --client # client process status
+transitvpn down            # stop the server tunnel (record: state/tunnel.pid)
+transitvpn down --client   # stop the client tunnel (record: state/tunnel-client.pid)
+```
+
+Both roles use the same pidfd-bound ownership checks and never overwrite each other's process
+records. Starting a role whose config file is missing or invalid fails safely without touching
+the other role. `health --url http://...` sends its request through the imported client's
+configured loopback SOCKS listener. To stop everything, run `down --client` and then `down`.
+Recovery after a crash is `down --client` (or `down`) followed by `up --client` (or `up`).
+
+## Current evidence scope
+
+The pinned-Xray acceptance test exercises the whole local workflow through product entrypoints:
+server `up`, `export-profile`, `import-profile` into a private client state directory, client
+`up --client`, a real HTTP request through the client's SOCKS listener via the `health` CLI with
+responder evidence, `down --client` with unavailable traffic, `up --client` again with
+successful traffic, and final `down` of both roles. All listeners are on 127.0.0.1 and the
+REALITY target is a locally generated TLS 1.3 fixture, so this is a loopback proof only.
+External endpoint reachability, phone or Mac app import, DNS leak guarantees, and reachability
+from Beijing are unverified. The profile carries the supported peer settings only, not
+arbitrary DNS or routing policy.
+
 ## Local checks and limits
 
-`status` reports whether the managed process appears live; it does not verify HTTP tunnel health.
+`status` (server) and `status --client` (imported client) report whether the managed process appears live; they do not verify HTTP tunnel health.
 `health --url http://...` sends an HTTP request through the configured local SOCKS client and
 reports the observed response. It does not check process liveness or fall back to a direct request.
 

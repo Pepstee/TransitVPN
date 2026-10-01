@@ -21,6 +21,10 @@ def _atomic_write(path: Path, data: dict) -> None:
     os.replace(tmp, path)
 
 
+_SERVER_PID_NAME = "tunnel.pid"
+_CLIENT_PID_NAME = "tunnel-client.pid"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="transitvpn",
@@ -47,9 +51,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Timeout in seconds for the local certification run (default: 10)",
     )
 
-    subparsers.add_parser("up", help="Bring up the VPN tunnel")
-    subparsers.add_parser("down", help="Tear down the VPN tunnel")
-    subparsers.add_parser("status", help="Show tunnel status")
+    up_p = subparsers.add_parser("up", help="Bring up the VPN tunnel")
+    up_p.add_argument(
+        "--client", action="store_true",
+        help="Manage the imported client tunnel instead of the server",
+    )
+    down_p = subparsers.add_parser("down", help="Tear down the VPN tunnel")
+    down_p.add_argument(
+        "--client", action="store_true",
+        help="Manage the imported client tunnel instead of the server",
+    )
+    status_p = subparsers.add_parser("status", help="Show tunnel status")
+    status_p.add_argument(
+        "--client", action="store_true",
+        help="Manage the imported client tunnel instead of the server",
+    )
 
     health_p = subparsers.add_parser(
         "health", help="Request HTTP health through the configured local SOCKS tunnel"
@@ -66,6 +82,23 @@ def build_parser() -> argparse.ArgumentParser:
     export_p.add_argument(
         "--output", type=Path, required=True,
         help="New profile file under an existing private directory",
+    )
+
+    import_p = subparsers.add_parser(
+        "import-profile",
+        help="Import an exported VLESS+REALITY profile as the managed client config",
+    )
+    import_p.add_argument(
+        "--input", type=Path, required=True,
+        help="Private profile file produced by export-profile",
+    )
+    import_p.add_argument(
+        "--socks-port", type=int, default=10808, metavar="PORT",
+        help="Loopback SOCKS listener port for the imported client (default: 10808)",
+    )
+    import_p.add_argument(
+        "--xray-binary", default=os.environ.get("TRANSITVPN_XRAY_BIN", "xray"),
+        help="Path to the pinned Xray executable",
     )
 
     bootstrap_p = subparsers.add_parser(
@@ -153,11 +186,19 @@ def _cmd_certify_local_tunnel(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_up(_args: argparse.Namespace) -> int:
+def _cmd_up(args: argparse.Namespace) -> int:
     from transitvpn.tunnel import start_tunnel
 
-    config_path = str(Path("state") / "xray-server.json")
-    pid, err = start_tunnel(config_path, "state")
+    client = bool(getattr(args, "client", False))
+    config_path = str(
+        Path("state") / ("xray-client.json" if client else "xray-server.json")
+    )
+    if client:
+        pid, err = start_tunnel(
+            config_path, "state", pid_name=_CLIENT_PID_NAME
+        )
+    else:
+        pid, err = start_tunnel(config_path, "state")
     if err is not None:
         print(f"up: error: {err}")
         return 1
@@ -165,10 +206,14 @@ def _cmd_up(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_down(_args: argparse.Namespace) -> int:
+def _cmd_down(args: argparse.Namespace) -> int:
     from transitvpn.tunnel import stop_tunnel
 
-    error = stop_tunnel("state")
+    client = bool(getattr(args, "client", False))
+    if client:
+        error = stop_tunnel("state", pid_name=_CLIENT_PID_NAME)
+    else:
+        error = stop_tunnel("state")
     if error is not None:
         print(f"down: error: {error}")
         return 1
@@ -176,14 +221,18 @@ def _cmd_down(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_status(_args: argparse.Namespace) -> int:
+def _cmd_status(args: argparse.Namespace) -> int:
     from transitvpn.tunnel import get_status, lifecycle_support_error
 
     support_error = lifecycle_support_error()
     if support_error:
         print(f"status: unavailable; {support_error}")
         return 2
-    running, pid = get_status("state")
+    client = bool(getattr(args, "client", False))
+    if client:
+        running, pid = get_status("state", pid_name=_CLIENT_PID_NAME)
+    else:
+        running, pid = get_status("state")
     if running:
         print(f"status: live process (pid={pid}); tunnel health unverified")
     else:
@@ -240,6 +289,37 @@ def _cmd_export_profile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_import_profile(args: argparse.Namespace) -> int:
+    from transitvpn.import_profile import ProfileImportError, import_profile
+
+    if (
+        isinstance(args.socks_port, bool)
+        or not isinstance(args.socks_port, int)
+        or not 1 <= args.socks_port <= 65535
+    ):
+        print(
+            "import-profile: error: --socks-port must be between 1 and 65535",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        import_profile(
+            args.input,
+            Path("state") / "xray-client.json",
+            socks_port=args.socks_port,
+            xray_binary=args.xray_binary,
+        )
+    except ProfileImportError:
+        print(
+            "import-profile: error: client profile could not be imported",
+            file=sys.stderr,
+        )
+        return 1
+    print("import-profile: client profile imported and validated")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -265,6 +345,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "export-profile":
         return _cmd_export_profile(args)
+
+    if args.command == "import-profile":
+        return _cmd_import_profile(args)
 
     if args.command == "bootstrap":
         return _cmd_bootstrap(args)

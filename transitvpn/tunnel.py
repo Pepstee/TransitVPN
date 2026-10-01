@@ -4,16 +4,16 @@ import hashlib
 import hmac
 import json
 import os
-from pathlib import Path
 import re
-import select
 import secrets
+import select
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 from transitvpn.xray import verify_binary
 
@@ -39,6 +39,19 @@ _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 # brief liveness check turns "I spawned a process" into "the tunnel is up".
 _STARTUP_SETTLE_SECONDS = 0.25
 _STOP_GRACE_SECONDS = 5.0
+_DEFAULT_PID_NAME = "tunnel.pid"
+
+
+def _pid_file_path(state_dir: Path, pid_name: str) -> Path:
+    """Resolve one plain process-record filename inside the state directory."""
+    if (
+        not isinstance(pid_name, str)
+        or not pid_name
+        or Path(pid_name).name != pid_name
+        or pid_name in {".", ".."}
+    ):
+        raise ValueError("invalid process record name")
+    return state_dir / pid_name
 
 
 def lifecycle_support_error() -> str | None:
@@ -304,7 +317,12 @@ def _startup_failure(pidfd: int, reason: str) -> tuple[None, str]:
     return None, f"{reason}; spawned process may remain alive, and state was not recorded"
 
 
-def start_tunnel(config_path: str, state_dir: str) -> tuple[int | None, str | None]:
+def start_tunnel(
+    config_path: str,
+    state_dir: str,
+    *,
+    pid_name: str = _DEFAULT_PID_NAME,
+) -> tuple[int | None, str | None]:
     config = Path(config_path)
     if not config.exists():
         return None, f"config not found: {config_path}"
@@ -329,7 +347,10 @@ def start_tunnel(config_path: str, state_dir: str) -> tuple[int | None, str | No
 
     state = Path(state_dir)
     state.mkdir(parents=True, exist_ok=True)
-    pid_file = state / "tunnel.pid"
+    try:
+        pid_file = _pid_file_path(state, pid_name)
+    except ValueError:
+        return None, "invalid process record name"
     existing, existing_raw = _read_record(pid_file)
     if existing_raw is not None:
         if existing is None:
@@ -432,13 +453,18 @@ def start_tunnel(config_path: str, state_dir: str) -> tuple[int | None, str | No
         os.close(pidfd)
 
 
-def stop_tunnel(state_dir: str) -> str | None:
+def stop_tunnel(
+    state_dir: str, *, pid_name: str = _DEFAULT_PID_NAME
+) -> str | None:
     """Stop only the exact process incarnation recorded by start_tunnel.
 
     An error is returned for ambiguous state, and that state is preserved. The
     caller must not report a successful stop when this returns a message.
     """
-    pid_file = Path(state_dir) / "tunnel.pid"
+    try:
+        pid_file = _pid_file_path(Path(state_dir), pid_name)
+    except ValueError:
+        return "invalid process record name"
     record, original = _read_record(pid_file)
     if original is None:
         return None
@@ -492,10 +518,15 @@ def stop_tunnel(state_dir: str) -> str | None:
         os.close(pidfd)
 
 
-def get_status(state_dir: str) -> tuple[bool, int | None]:
+def get_status(
+    state_dir: str, *, pid_name: str = _DEFAULT_PID_NAME
+) -> tuple[bool, int | None]:
     if lifecycle_support_error():
         return False, None
-    pid_file = Path(state_dir) / "tunnel.pid"
+    try:
+        pid_file = _pid_file_path(Path(state_dir), pid_name)
+    except ValueError:
+        return False, None
     record, raw = _read_record(pid_file)
     if raw is None or record is None:
         return False, None
