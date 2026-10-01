@@ -60,6 +60,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Request timeout in seconds (default: 5; maximum: 30)",
     )
 
+    export_p = subparsers.add_parser(
+        "export-profile", help="Export the configured VLESS+REALITY client profile privately"
+    )
+    export_p.add_argument(
+        "--output", type=Path, required=True,
+        help="New profile file under an existing private directory",
+    )
+
     bootstrap_p = subparsers.add_parser(
         "bootstrap", help="Generate and validate matching Xray server/client configs"
     )
@@ -220,6 +228,18 @@ def _cmd_health(args: argparse.Namespace) -> int:
     return 0 if record["health"] == "healthy" else 1
 
 
+def _cmd_export_profile(args: argparse.Namespace) -> int:
+    from transitvpn.export_profile import ProfileExportError, export_profile
+
+    try:
+        export_profile(Path("state") / "xray-client.json", args.output)
+    except ProfileExportError:
+        print("export-profile: error: client profile could not be exported", file=sys.stderr)
+        return 1
+    print("export-profile: profile exported")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -242,6 +262,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "health":
         return _cmd_health(args)
+
+    if args.command == "export-profile":
+        return _cmd_export_profile(args)
 
     if args.command == "bootstrap":
         return _cmd_bootstrap(args)

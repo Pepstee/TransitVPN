@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -22,7 +22,7 @@ def _run(*args: str, cwd: Path, script: bool = False) -> subprocess.CompletedPro
     entry = [str(_REPO / "transitvpn/cli.py")] if script else ["-m", "transitvpn"]
     env = {**os.environ, "PYTHONPATH": str(_REPO)}
     return subprocess.run([sys.executable, *entry, *args], cwd=cwd, env=env,
-                          capture_output=True, text=True, timeout=60,
+                          capture_output=True, text=True, timeout=60, check=False,
                           stdin=subprocess.DEVNULL)
 
 
@@ -99,7 +99,7 @@ assert first.ss_password and first.ss_password != second.ss_password
 '''
     result = subprocess.run([sys.executable, "-c", script], cwd=tmp_path,
                             env={**os.environ, "PYTHONPATH": str(_REPO)},
-                            capture_output=True, text=True, timeout=30)
+                            capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
 
@@ -144,7 +144,7 @@ def test_acceptance_delegates_and_reports_executed_smoke_boundaries(tmp_path):
     assert os.access(acceptance, os.X_OK)
     assert acceptance.read_text().splitlines()[0].startswith("#!/usr/bin/env bash")
     result = subprocess.run(["bash", str(acceptance)], cwd=tmp_path,
-                            capture_output=True, text=True, timeout=60)
+                            capture_output=True, text=True, timeout=60, check=False)
     assert result.returncode == 0, result.stderr
     for boundary in ("py_compile", "imports", "credential boundary", "--help", "--version",
                      "subcommand up", "subcommand down", "subcommand status",
@@ -156,7 +156,7 @@ def test_acceptance_delegates_and_reports_executed_smoke_boundaries(tmp_path):
 @pytest.mark.parametrize("module_path", [
     "transitvpn/__init__.py", "transitvpn/cli.py", "transitvpn/keygen.py",
     "transitvpn/cgnat.py", "transitvpn/config.py", "transitvpn/server.py",
-    "transitvpn/qrcode.py",
+    "transitvpn/qrcode.py", "transitvpn/export_profile.py",
 ])
 def test_modules_compile_without_writing_source_cache(tmp_path, module_path):
     import py_compile
@@ -170,10 +170,11 @@ def test_retained_public_imports_in_subprocess(tmp_path):
         "from transitvpn.keygen import Keys, generate_keys; "
         "from transitvpn.config import VlessConfig, ShadowsocksConfig, RelayConfig, XrayDeployment; "
         "from transitvpn.server import build_xray_config, build_ss_config, build_server_config, build_client_config; "
+        "from transitvpn.export_profile import build_profile_uri, export_profile; "
         "from transitvpn.cli import build_parser, main"
     )
     result = subprocess.run([sys.executable, "-c", source], cwd=tmp_path,
                             env={**os.environ, "PYTHONPATH": str(_REPO)},
-                            capture_output=True, text=True, timeout=30)
+                            capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""

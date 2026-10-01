@@ -30,19 +30,45 @@ def make_vless_uri(
     ``fp`` (TLS fingerprint) and ``flow``. Without these the link cannot
     establish a connection.
     """
+    return make_vless_uri_from_fields(
+        keys.vless_uuid,
+        keys.reality_public_key,
+        host,
+        port,
+        sni=sni,
+        short_id=short_id,
+        fingerprint=fingerprint,
+        flow=flow,
+    )
+
+
+def make_vless_uri_from_fields(
+    user_id: str,
+    public_key: str,
+    host: str,
+    port: int,
+    *,
+    sni: str,
+    short_id: str,
+    fingerprint: str = DEFAULT_FINGERPRINT,
+    flow: str | None = None,
+) -> str:
+    """Build a VLESS+REALITY URI from already validated peer fields."""
     if not sni or not short_id:
         raise ValueError("sni and short_id must not be empty")
-    params = urlencode({
+    params = {
         "security": "reality",
         "encryption": "none",
         "type": "tcp",
-        "pbk": keys.reality_public_key,
+        "pbk": public_key,
         "sni": sni,
         "sid": short_id,
         "fp": fingerprint,
-        "flow": flow,
-    })
-    return f"vless://{keys.vless_uuid}@{host}:{port}?{params}"
+    }
+    if flow is not None:
+        params["flow"] = flow
+    uri_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"vless://{user_id}@{uri_host}:{port}?{urlencode(params)}"
 
 
 def make_ss_uri(

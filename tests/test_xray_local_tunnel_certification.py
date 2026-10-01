@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+import os
 import secrets
-import ssl
 import socket
 import socketserver
+import ssl
+import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unittest
 import uuid
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -27,7 +32,6 @@ from transitvpn import xray_certification as certification
 from transitvpn.config import XrayDeployment
 from transitvpn.keygen import generate_keys, generate_short_id
 from transitvpn.server import build_client_config, build_server_config
-
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 _LOOPBACK = "127.0.0.1"
@@ -200,11 +204,11 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
                 side_effect=[server_credential, wrong_client_credential],
             ),
             mock.patch.object(certification, "_Responder", side_effect=capture_responder),
+            self.assertRaises(certification.XrayCertificationError),
         ):
-            with self.assertRaises(certification.XrayCertificationError):
-                certification.certify_local_tunnel(
-                    executable, timeout=10.0, credential_mismatch=True
-                )
+            certification.certify_local_tunnel(
+                executable, timeout=10.0, credential_mismatch=True
+            )
 
         self.assertEqual(len(responders), 1)
         self.assertEqual(responders[0].request_count, 0)
@@ -219,8 +223,87 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
     def test_wrong_reality_public_key_uses_only_loopback_fallback(self) -> None:
         self._assert_wrong_reality_mismatch_uses_only_loopback_fallback("public-key")
 
+    def test_exported_profile_reconstructs_and_transfers_local_reality_http(self) -> None:
+        self._assert_wrong_reality_mismatch_uses_only_loopback_fallback(
+            "public-key", profile_roundtrip=True
+        )
+
+    def _export_profile_and_reconstruct_client(
+        self, root: Path, client_config: dict, credential_values: list[str]
+    ) -> tuple[dict, str]:
+        state = root / "state"
+        state.mkdir(mode=0o700)
+        input_path = state / "xray-client.json"
+        certification._write_config(input_path, client_config)
+        input_before = input_path.read_bytes()
+        profile_path = root / "private-export" / "client.vless"
+        command = [
+            sys.executable, "-m", "transitvpn", "export-profile",
+            "--output", str(profile_path),
+        ]
+        result = subprocess.run(
+            command,
+            cwd=root,
+            env={**os.environ, "PYTHONPATH": str(REPOSITORY)},
+            capture_output=True,
+            text=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        self.assertTrue(result.returncode == 0, "actual export CLI failed")
+        self.assertTrue(result.stdout == "export-profile: profile exported\n",
+                        "export CLI success output is not generic")
+        self.assertTrue(result.stderr == "", "export CLI wrote unexpected error output")
+        self.assertTrue(input_path.read_bytes() == input_before, "export changed its input")
+        self.assertTrue(stat.S_IMODE(profile_path.parent.stat().st_mode) == 0o700,
+                        "export directory is not private")
+        self.assertTrue(stat.S_IMODE(profile_path.stat().st_mode) == 0o600,
+                        "export file is not private")
+        uri = profile_path.read_text(encoding="utf-8").rstrip("\n")
+        credential_values.append(uri)
+        self.assertTrue(all(value not in result.stdout + result.stderr
+                            for value in credential_values),
+                        "export CLI exposed profile material")
+        try:
+            parsed = urlsplit(uri)
+            values = parse_qs(parsed.query, strict_parsing=True)
+        except ValueError:
+            self.fail("exported profile URI could not be parsed")
+        expected = {"security", "encryption", "type", "pbk", "sni", "sid", "fp", "flow"}
+        self.assertTrue(parsed.scheme == "vless" and parsed.hostname and parsed.port,
+                        "exported profile endpoint is malformed")
+        self.assertTrue(set(values) == expected, "exported profile fields are incomplete")
+        self.assertTrue(all(len(items) == 1 for items in values.values()),
+                        "exported profile has duplicate query fields")
+        self.assertTrue(
+            values["security"][0] == "reality"
+            and values["encryption"][0] == "none"
+            and values["type"][0] == "tcp",
+            "exported profile transport is unsupported",
+        )
+
+        reconstructed = json.loads(json.dumps(client_config))
+        peer = reconstructed["outbounds"][0]["settings"]["vnext"][0]
+        user = peer["users"][0]
+        peer["address"] = parsed.hostname
+        peer["port"] = parsed.port
+        user["id"] = parsed.username
+        user["encryption"] = values["encryption"][0]
+        user["flow"] = values["flow"][0]
+        stream = reconstructed["outbounds"][0]["streamSettings"]
+        stream["network"] = "raw"
+        stream["security"] = values["security"][0]
+        stream["realitySettings"] = {
+            "serverName": values["sni"][0],
+            "fingerprint": values["fp"][0],
+            "publicKey": values["pbk"][0],
+            "shortId": values["sid"][0],
+        }
+        return reconstructed, uri
+
     def _assert_wrong_reality_mismatch_uses_only_loopback_fallback(
-        self, mismatch_kind: str
+        self, mismatch_kind: str, *, profile_roundtrip: bool = False
     ) -> None:
         if mismatch_kind == "short-id":
             mismatch_field, mismatch_label = "shortId", "short-ID"
@@ -256,6 +339,7 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
         server_process: object | None = None
         client_process: object | None = None
         cleanup_failed = False
+        exported_uri: str | None = None
 
         with tempfile.TemporaryDirectory(prefix="transitvpn-reality-local-") as directory:
             root = Path(directory)
@@ -364,6 +448,12 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
                         "wrong-key fixture changed the REALITY short ID",
                     )
                 matching_client_config = build_client_config(deployment)
+                if profile_roundtrip:
+                    matching_client_config, exported_uri = (
+                        self._export_profile_and_reconstruct_client(
+                            root, matching_client_config, keys_to_scan
+                        )
+                    )
                 wrong_client_config = build_client_config(wrong_deployment)
 
                 validation = xray.validate_configs(
@@ -483,7 +573,8 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
             finally:
                 try:
                     certification._stop_all(client_process, server_process)
-                except Exception:
+                # Continue teardown and report every cleanup failure.
+                except Exception:  # noqa: BLE001
                     cleanup_failed = True
                 for server, thread, started in (
                     (target, target_thread, target_started),
@@ -497,7 +588,8 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
                     else:
                         try:
                             server.server_close()
-                        except Exception:
+                        # Close the other fixture even if this close raises.
+                        except Exception:  # noqa: BLE001
                             cleanup_failed = True
                 if cleanup_failed:
                     raise certification.XrayCertificationError(
@@ -511,6 +603,7 @@ class LocalXrayTunnelCertificationTests(unittest.TestCase):
                 *keys_to_scan,
                 server_short_id,
                 wrong_short_id,
+                *((exported_uri,) if exported_uri is not None else ()),
             ),
         )
 
