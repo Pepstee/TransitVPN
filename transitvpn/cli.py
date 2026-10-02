@@ -180,6 +180,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Private backup directory created by config-backup",
     )
     restore_p.add_argument(
+        "--replace",
+        dest="replace_existing",
+        action="store_true",
+        help="Replace both existing stopped deployment configs after validation",
+    )
+    restore_p.add_argument(
         "--xray-binary", default=os.environ.get("TRANSITVPN_XRAY_BIN", "xray"),
         help="Path to the pinned Xray executable",
     )
@@ -492,7 +498,12 @@ def _cmd_config_restore(args: argparse.Namespace) -> int:
     from transitvpn.config_backup import ConfigBackupError, restore_configs
 
     try:
-        restore_configs(Path("state"), args.source, xray_binary=args.xray_binary)
+        restore_configs(
+            Path("state"),
+            args.source,
+            xray_binary=args.xray_binary,
+            replace_existing=args.replace_existing,
+        )
     except ConfigBackupError:
         print(
             "config-restore: error: trusted configuration backup could not be restored",

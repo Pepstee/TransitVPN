@@ -1207,6 +1207,316 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
         assert not _entries(_unit_paths(), installed_service_unit)
         installed_service_attempted = False
 
+        rollback_baseline_profile_path = (
+            server_workdir / "private-export" / "rollback-baseline.vless"
+        )
+        rollback_changed_profile_path = (
+            server_workdir / "private-export" / "rollback-changed-port.vless"
+        )
+        profile_paths.extend(
+            (rollback_baseline_profile_path, rollback_changed_profile_path)
+        )
+        rollback_backup_path = backup_parent / "pre-rollback-current"
+        client_down_before_rollback = run_cli(client_workdir, "down", "--client")
+        assert client_down_before_rollback.returncode == 0
+        rollback_original_configs = {
+            name: path.read_bytes() for name, path in server_config_paths.items()
+        }
+        rollback_original_client = client_config_path.read_bytes()
+        rollback_backup = run_cli(
+            server_workdir,
+            "config-backup",
+            "--destination",
+            str(rollback_backup_path),
+        )
+        assert rollback_backup.returncode == 0
+
+        def assert_private_rollback_backup(
+            directory: Path, expected: dict[str, bytes], label: str
+        ) -> None:
+            directory_info = directory.lstat()
+            if (
+                not stat.S_ISDIR(directory_info.st_mode)
+                or stat.S_IMODE(directory_info.st_mode) != 0o700
+                or {path.name for path in directory.iterdir()} != set(expected)
+            ):
+                raise AssertionError(f"{label} rollback backup was not a private two-file directory")
+            for name, data in expected.items():
+                saved = directory / name
+                saved_info = saved.lstat()
+                if (
+                    not stat.S_ISREG(saved_info.st_mode)
+                    or stat.S_IMODE(saved_info.st_mode) != 0o600
+                    or saved_info.st_nlink != 1
+                    or saved.read_bytes() != data
+                ):
+                    raise AssertionError(f"{label} rollback backup was not preserved")
+
+        assert_private_rollback_backup(
+            rollback_backup_path, rollback_original_configs, "baseline"
+        )
+
+        baseline_export = run_cli(
+            server_workdir,
+            "export-profile",
+            "--output",
+            str(rollback_baseline_profile_path),
+        )
+        assert baseline_export.returncode == 0
+        assert stat.S_IMODE(rollback_baseline_profile_path.stat().st_mode) == 0o600
+        baseline_profile_bytes = rollback_baseline_profile_path.read_bytes()
+
+        rollback_changed_port = fresh_port()
+        changed_server_config = json.loads(
+            rollback_original_configs["xray-server.json"]
+        )
+        changed_client_config = json.loads(
+            rollback_original_configs["xray-client.json"]
+        )
+        changed_server_config["inbounds"][0]["port"] = rollback_changed_port
+        changed_client_config["outbounds"][0]["settings"]["vnext"][0]["port"] = (
+            rollback_changed_port
+        )
+        xray_module.validate_configs(
+            {"server": changed_server_config, "client": changed_client_config},
+            binary=executable,
+        )
+        changed_config_bytes = {
+            "xray-server.json": (
+                json.dumps(changed_server_config, indent=2) + "\n"
+            ).encode("utf-8"),
+            "xray-client.json": (
+                json.dumps(changed_client_config, indent=2) + "\n"
+            ).encode("utf-8"),
+        }
+        for name, data in changed_config_bytes.items():
+            server_config_paths[name].write_bytes(data)
+            server_config_paths[name].chmod(0o600)
+
+        changed_export = run_cli(
+            server_workdir,
+            "export-profile",
+            "--output",
+            str(rollback_changed_profile_path),
+        )
+        assert changed_export.returncode == 0
+        assert stat.S_IMODE(rollback_changed_profile_path.stat().st_mode) == 0o600
+        if rollback_changed_profile_path.read_bytes() == baseline_profile_bytes:
+            raise AssertionError("changed endpoint did not produce a changed profile")
+        changed_import = run_cli(
+            client_workdir,
+            "import-profile",
+            "--input",
+            str(rollback_changed_profile_path),
+            "--socks-port",
+            str(socks_port),
+            "--xray-binary",
+            executable,
+            "--replace",
+        )
+        assert changed_import.returncode == 0
+        installed_service_attempted = True
+        changed_install = run_cli(
+            server_workdir,
+            "service-install",
+            "--name",
+            installed_service_name,
+            "--xray-binary",
+            executable,
+        )
+        assert changed_install.returncode == 0
+        changed_service_pid = wait_service_child(previous_pid=restarted_installed_pid)
+        assert changed_service_pid != restarted_installed_pid
+        _wait_port_open(rollback_changed_port)
+        assert _port_is_closed(server_port)
+        client_up_for_changed_endpoint = run_cli(
+            client_workdir, "up", "--client"
+        )
+        assert client_up_for_changed_endpoint.returncode == 0
+        _wait_port_open(socks_port)
+        requests_before_changed_health = responder.request_count
+        changed_endpoint_health = run_cli(
+            client_workdir, "health", "--url", health_url
+        )
+        assert changed_endpoint_health.returncode == 0
+        changed_endpoint_record = json.loads(changed_endpoint_health.stdout)
+        assert changed_endpoint_record["health"] == "healthy"
+        assert changed_endpoint_record["http_observed"] is True
+        assert changed_endpoint_record["route"] == "configured_socks"
+        assert responder.request_count == requests_before_changed_health + 1
+        for name, data in changed_config_bytes.items():
+            if server_config_paths[name].read_bytes() != data:
+                raise AssertionError("changed endpoint configs were not applied")
+
+        changed_service_stop = run_cli(
+            server_workdir, "service-stop", "--name", installed_service_name
+        )
+        assert changed_service_stop.returncode == 0
+        time.sleep(1.25)
+        requests_before_changed_stop_check = responder.request_count
+        changed_stopped_health = run_cli(
+            client_workdir, "health", "--url", health_url
+        )
+        assert changed_stopped_health.returncode == 1
+        changed_stopped_record = json.loads(changed_stopped_health.stdout)
+        assert changed_stopped_record["health"] == "unhealthy"
+        assert changed_stopped_record["http_observed"] is False
+        assert responder.request_count == requests_before_changed_stop_check
+        assert _port_is_closed(rollback_changed_port)
+        changed_service_uninstall = run_cli(
+            server_workdir,
+            "service-uninstall",
+            "--name",
+            installed_service_name,
+        )
+        assert changed_service_uninstall.returncode == 0
+        installed_service_attempted = False
+        assert not installed_service_unit_path.exists()
+        assert not installed_service_manifest_path.exists()
+        client_down_for_rollback = run_cli(client_workdir, "down", "--client")
+        assert client_down_for_rollback.returncode == 0
+
+        changed_rollback_backup_path = backup_parent / "changed-before-restore"
+        changed_rollback_backup = run_cli(
+            server_workdir,
+            "config-backup",
+            "--destination",
+            str(changed_rollback_backup_path),
+        )
+        assert changed_rollback_backup.returncode == 0
+        assert_private_rollback_backup(
+            changed_rollback_backup_path, changed_config_bytes, "changed-state"
+        )
+
+        changed_state_before_refusal = {
+            name: (
+                path.read_bytes(),
+                path.stat().st_ino,
+                path.stat().st_mtime_ns,
+            )
+            for name, path in server_config_paths.items()
+        }
+        default_overwrite_refusal = run_cli(
+            server_workdir,
+            "config-restore",
+            "--source",
+            str(rollback_backup_path),
+            "--xray-binary",
+            executable,
+        )
+        assert default_overwrite_refusal.returncode == 1
+        assert default_overwrite_refusal.stdout == ""
+        assert default_overwrite_refusal.stderr == (
+            "config-restore: error: trusted configuration backup could not be restored\n"
+        )
+        for name, path in server_config_paths.items():
+            before = changed_state_before_refusal[name]
+            current = path.stat()
+            if (
+                path.read_bytes() != before[0]
+                or current.st_ino != before[1]
+                or current.st_mtime_ns != before[2]
+            ):
+                raise AssertionError("default restore refusal changed current config")
+
+        replacement_restore = run_cli(
+            server_workdir,
+            "config-restore",
+            "--replace",
+            "--source",
+            str(rollback_backup_path),
+            "--xray-binary",
+            executable,
+        )
+        assert replacement_restore.returncode == 0
+        assert replacement_restore.stdout == (
+            "config-restore: trusted configuration backup restored and validated\n"
+        )
+        assert replacement_restore.stderr == ""
+        for name, original in rollback_original_configs.items():
+            restored_config = server_config_paths[name]
+            if restored_config.read_bytes() != original:
+                raise AssertionError("replacement restore did not recover baseline config")
+            assert stat.S_IMODE(restored_config.stat().st_mode) == 0o600
+            assert restored_config.stat().st_nlink == 1
+            if (rollback_backup_path / name).read_bytes() != original:
+                raise AssertionError("replacement restore changed its trusted backup")
+        assert_private_rollback_backup(
+            rollback_backup_path, rollback_original_configs, "baseline"
+        )
+        assert_private_rollback_backup(
+            changed_rollback_backup_path, changed_config_bytes, "changed-state"
+        )
+        if not _port_is_closed(rollback_changed_port):
+            raise AssertionError("changed endpoint remained open after rollback")
+
+        baseline_import = run_cli(
+            client_workdir,
+            "import-profile",
+            "--input",
+            str(rollback_baseline_profile_path),
+            "--socks-port",
+            str(socks_port),
+            "--xray-binary",
+            executable,
+            "--replace",
+        )
+        assert baseline_import.returncode == 0
+        if client_config_path.read_bytes() != rollback_original_client:
+            raise AssertionError("baseline profile did not restore the previous client config")
+
+        installed_service_attempted = True
+        baseline_install = run_cli(
+            server_workdir,
+            "service-install",
+            "--name",
+            installed_service_name,
+            "--xray-binary",
+            executable,
+        )
+        assert baseline_install.returncode == 0
+        baseline_service_pid = wait_service_child(previous_pid=changed_service_pid)
+        assert baseline_service_pid != changed_service_pid
+        _wait_port_open(server_port)
+        assert _port_is_closed(rollback_changed_port)
+        client_up_for_baseline = run_cli(client_workdir, "up", "--client")
+        assert client_up_for_baseline.returncode == 0
+        _wait_port_open(socks_port)
+        requests_before_baseline_health = responder.request_count
+        baseline_health = run_cli(client_workdir, "health", "--url", health_url)
+        assert baseline_health.returncode == 0
+        baseline_health_record = json.loads(baseline_health.stdout)
+        assert baseline_health_record["health"] == "healthy"
+        assert baseline_health_record["http_observed"] is True
+        assert baseline_health_record["route"] == "configured_socks"
+        assert responder.request_count == requests_before_baseline_health + 1
+        assert_private_rollback_backup(
+            rollback_backup_path, rollback_original_configs, "baseline"
+        )
+        assert_private_rollback_backup(
+            changed_rollback_backup_path, changed_config_bytes, "changed-state"
+        )
+        if not _port_is_closed(rollback_changed_port):
+            raise AssertionError("changed endpoint reopened after rollback")
+
+        final_service_stop = run_cli(
+            server_workdir, "service-stop", "--name", installed_service_name
+        )
+        assert final_service_stop.returncode == 0
+        final_service_uninstall = run_cli(
+            server_workdir,
+            "service-uninstall",
+            "--name",
+            installed_service_name,
+        )
+        assert final_service_uninstall.returncode == 0
+        installed_service_attempted = False
+        assert not installed_service_unit_path.exists()
+        assert not installed_service_manifest_path.exists()
+        assert _wait_recorded_pid_gone(changed_service_pid)
+        assert _wait_recorded_pid_gone(baseline_service_pid)
+        assert _port_is_closed(server_port)
+        assert _port_is_closed(rollback_changed_port)
         final_client_down = run_cli(client_workdir, "down", "--client")
         assert final_client_down.returncode == 0
         final_server_down = run_cli(server_workdir, "down")

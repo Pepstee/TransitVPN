@@ -220,12 +220,48 @@ PINNED_XRAY=/absolute/path/to/pinned/xray
 
 Restore does not import a new client profile or alter the existing imported-client directory.
 
-Restore refuses any `tunnel.pid` or `tunnel-client.pid` filesystem entry and refuses to
-overwrite either existing config. It accepts exactly the two private regular single-link
-files, validates both with the byte-pinned Xray executable before writing, restores mode
-0600, and compares the restored bytes with the backup. The two-file restore is not an
-atomic transaction: an interruption between file writes can leave one config restored;
-inspect `state/` before retrying. The command prints only a generic result.
+By default, restore refuses any `tunnel.pid` or `tunnel-client.pid` filesystem entry and
+refuses to overwrite either existing config. The explicit `--replace` option is for rolling
+back a stopped deployment when both configs already exist. It accepts only the two private
+regular single-link files, validates both backup configs with the byte-pinned Xray executable
+before changing either destination, rechecks the backup and current-file snapshots, restores
+mode 0600, and verifies the restored bytes. Keep both roles stopped and remove the matching
+managed service before changing configs; reinstall it after restoring because its ownership
+binding includes the config contents.
+
+The two-file replacement is not crash-atomic. If the process fails during a replacement,
+TransitVPN attempts to restore the previous pair while it can still prove ownership of the
+files it changed. A process or host interruption between file replacements can leave both
+files present with a mixed pair. Keep the roles stopped, inspect `state/`, and rerun
+`config-restore --replace` with the same trusted backup to apply the complete pair. Preserve
+the current pair in a separate private backup before rollback. The command prints only a
+generic result.
+
+### Roll back existing configuration
+
+Use an existing trusted backup for the version of the configuration you want to restore and
+retain a separate backup of the current pair before replacing it. Export or retain the
+matching client profile privately. The following route assumes the owned service is
+installed; `service-uninstall` removes only that deployment's verified unit:
+
+```console
+set -eu
+SERVER_WORKDIR=/absolute/path/to/server-deployment
+CLIENT_WORKDIR=/absolute/path/to/existing-imported-client
+TRUSTED_BACKUP=/absolute/path/to/trusted/private/backup
+CURRENT_BACKUP=/absolute/path/to/new/private/pre-rollback-backup
+MATCHING_PROFILE=/absolute/path/to/private/profile/matching-the-trusted-backup.vless
+PINNED_XRAY=/absolute/path/to/pinned/xray
+UNIT_NAME=travel
+( cd "$CLIENT_WORKDIR" && transitvpn down --client )
+( cd "$SERVER_WORKDIR" && transitvpn service-stop --name "$UNIT_NAME" && transitvpn service-uninstall --name "$UNIT_NAME" && transitvpn down )
+( cd "$SERVER_WORKDIR" && transitvpn config-backup --destination "$CURRENT_BACKUP" && transitvpn config-restore --replace --source "$TRUSTED_BACKUP" --xray-binary "$PINNED_XRAY" && transitvpn service-install --name "$UNIT_NAME" --xray-binary "$PINNED_XRAY" )
+( cd "$CLIENT_WORKDIR" && transitvpn import-profile --input "$MATCHING_PROFILE" --replace --xray-binary "$PINNED_XRAY" && transitvpn up --client && transitvpn health --url http://127.0.0.1:PORT/health )
+```
+
+Replace the placeholders with the actual private paths and configured loopback health port.
+This restores configuration only; software-version rollback and boot/login behavior are not
+established. Restoring old credentials may re-enable access they previously granted.
 
 The directory is trusted storage for reusable long-term credentials. In-process SHA-256
 comparisons detect copy changes; they do not authenticate an untrusted backup. Protect the
