@@ -250,12 +250,175 @@ def _write_new_config(path: Path, config: dict[str, Any]) -> None:
         _reject()
 
 
+def _stat_signature(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _stat_at(directory_fd: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _remove_staged_config(
+    directory_fd: int, name: str | None, identity: os.stat_result | None
+) -> None:
+    if name is None or identity is None:
+        return
+    try:
+        current = _stat_at(directory_fd, name)
+        if current is not None and (
+            current.st_dev,
+            current.st_ino,
+        ) == (identity.st_dev, identity.st_ino):
+            os.unlink(name, dir_fd=directory_fd)
+    except OSError:
+        pass
+
+
+def _write_replacement_config(path: Path, config: dict[str, Any]) -> None:
+    """Replace one stopped managed client config without a missing-file window."""
+    directory_fd: int | None = None
+    fd: int | None = None
+    staged_name: str | None = None
+    staged_identity: os.stat_result | None = None
+    try:
+        if not path.name:
+            _reject()
+        parent_before = path.parent.lstat()
+        if (
+            not stat.S_ISDIR(parent_before.st_mode)
+            or stat.S_IMODE(parent_before.st_mode) & 0o077
+            or stat.S_IMODE(parent_before.st_mode) & 0o300 != 0o300
+        ):
+            _reject()
+        _ensure_private_parent(path)
+        directory_fd = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        directory_info = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(directory_info.st_mode)
+            or (directory_info.st_dev, directory_info.st_ino)
+            != (parent_before.st_dev, parent_before.st_ino)
+            or stat.S_IMODE(directory_info.st_mode) & 0o077
+            or stat.S_IMODE(directory_info.st_mode) & 0o300 != 0o300
+        ):
+            _reject()
+
+        destination_name = path.name
+        original = _stat_at(directory_fd, destination_name)
+        if (
+            original is None
+            or not stat.S_ISREG(original.st_mode)
+            or original.st_nlink != 1
+            or stat.S_IMODE(original.st_mode) & 0o077
+        ):
+            _reject()
+
+        existing_fd = os.open(
+            destination_name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        try:
+            opened = os.fstat(existing_fd)
+            if _stat_signature(opened) != _stat_signature(original):
+                _reject()
+        finally:
+            os.close(existing_fd)
+
+        # lstat-style lookup treats even a dangling symlink as a lifecycle record.
+        if _stat_at(directory_fd, "tunnel-client.pid") is not None:
+            _reject()
+
+        staged_name = f".{destination_name}.{uuid.uuid4().hex}.tmp"
+        fd = os.open(
+            staged_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        staged_identity = os.fstat(fd)
+        if not stat.S_ISREG(staged_identity.st_mode) or staged_identity.st_nlink != 1:
+            _reject()
+        os.fchmod(fd, 0o600)
+        remaining = memoryview((json.dumps(config, indent=2) + "\n").encode("utf-8"))
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError()
+            remaining = remaining[written:]
+        os.fsync(fd)
+
+        current = _stat_at(directory_fd, destination_name)
+        if current is None or _stat_signature(current) != _stat_signature(original):
+            _reject()
+        parent_current = path.parent.lstat()
+        if (
+            (parent_current.st_dev, parent_current.st_ino)
+            != (directory_info.st_dev, directory_info.st_ino)
+            or not stat.S_ISDIR(parent_current.st_mode)
+            or stat.S_IMODE(parent_current.st_mode) & 0o077
+        ):
+            _reject()
+        if _stat_at(directory_fd, "tunnel-client.pid") is not None:
+            _reject()
+        staged_now = _stat_at(directory_fd, staged_name)
+        if (
+            staged_now is None
+            or (staged_now.st_dev, staged_now.st_ino)
+            != (staged_identity.st_dev, staged_identity.st_ino)
+            or staged_now.st_nlink != 1
+        ):
+            _reject()
+
+        os.replace(
+            staged_name,
+            destination_name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        staged_name = None
+        os.fsync(directory_fd)
+    except ProfileImportError:
+        if directory_fd is not None:
+            _remove_staged_config(directory_fd, staged_name, staged_identity)
+        raise
+    except (OSError, TypeError, ValueError):
+        if directory_fd is not None:
+            _remove_staged_config(directory_fd, staged_name, staged_identity)
+        _reject()
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if directory_fd is not None:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+
+
 def import_profile(
     input_path: Path,
     output_path: Path,
     *,
     socks_port: int = _DEFAULT_SOCKS_PORT,
     xray_binary: str = "xray",
+    replace_existing: bool = False,
 ) -> None:
     """Validate one exported profile and write the managed client config privately."""
     try:
@@ -265,7 +428,11 @@ def import_profile(
             validate_configs({"client": config}, xray_binary)
         except RuntimeError:
             _reject()
-        _write_new_config(Path(output_path), config)
+        output = Path(output_path)
+        if replace_existing:
+            _write_replacement_config(output, config)
+        else:
+            _write_new_config(output, config)
     except ProfileImportError:
         raise
     except (

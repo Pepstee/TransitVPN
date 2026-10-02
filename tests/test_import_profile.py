@@ -196,6 +196,161 @@ class TestImportProfileIO(unittest.TestCase):
             self.assertFalse((root / "out4").exists())
 
 
+    def test_explicit_replacement_updates_only_a_stopped_private_config(self) -> None:
+        _old_config, old_uri, _old_keys = _generated_pair()
+        _new_config, new_uri, _new_keys = _generated_pair()
+        with tempfile.TemporaryDirectory(prefix="transitvpn-import-replace-") as directory:
+            root = Path(directory)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            old_profile = private / "old.vless"
+            new_profile = private / "new.vless"
+            old_profile.write_text(old_uri + "\n", encoding="utf-8")
+            new_profile.write_text(new_uri + "\n", encoding="utf-8")
+            old_profile.chmod(0o600)
+            new_profile.chmod(0o600)
+            output = root / "state" / "xray-client.json"
+            with mock.patch(
+                "transitvpn.import_profile.validate_configs",
+                return_value={"version": "test", "sha256": "0" * 64},
+            ):
+                import_profile(old_profile, output)
+                previous = output.read_bytes()
+                import_profile(new_profile, output, replace_existing=True)
+            self.assertTrue(
+                output.read_bytes() != previous,
+                "explicit profile replacement did not update the config",
+            )
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+            self.assertEqual(
+                sorted(path.name for path in output.parent.iterdir()),
+                ["xray-client.json"],
+            )
+
+    def test_replacement_validation_and_staging_failures_preserve_old_bytes(self) -> None:
+        _old_config, old_uri, _old_keys = _generated_pair()
+        _new_config, new_uri, _new_keys = _generated_pair()
+        with tempfile.TemporaryDirectory(prefix="transitvpn-import-replace-fail-") as directory:
+            root = Path(directory)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            old_profile = private / "old.vless"
+            new_profile = private / "new.vless"
+            old_profile.write_text(old_uri + "\n", encoding="utf-8")
+            new_profile.write_text(new_uri + "\n", encoding="utf-8")
+            old_profile.chmod(0o600)
+            new_profile.chmod(0o600)
+            output = root / "state" / "xray-client.json"
+            with mock.patch(
+                "transitvpn.import_profile.validate_configs",
+                return_value={"version": "test", "sha256": "0" * 64},
+            ):
+                import_profile(old_profile, output)
+            previous = output.read_bytes()
+
+            with mock.patch(
+                "transitvpn.import_profile.validate_configs",
+                side_effect=RuntimeError("invalid"),
+            ), self.assertRaises(ProfileImportError):
+                import_profile(new_profile, output, replace_existing=True)
+            self.assertTrue(
+                output.read_bytes() == previous,
+                "invalid pinned config validation changed the prior config",
+            )
+
+            with (
+                mock.patch(
+                    "transitvpn.import_profile.validate_configs",
+                    return_value={"version": "test", "sha256": "0" * 64},
+                ),
+                mock.patch(
+                    "transitvpn.import_profile.os.write",
+                    side_effect=OSError("staging write failed"),
+                ),
+                self.assertRaises(ProfileImportError),
+            ):
+                import_profile(new_profile, output, replace_existing=True)
+            self.assertTrue(
+                output.read_bytes() == previous,
+                "failed replacement staging changed the prior config",
+            )
+            self.assertEqual(
+                sorted(path.name for path in output.parent.iterdir()),
+                ["xray-client.json"],
+            )
+
+    def test_replacement_refuses_lifecycle_entries_and_unsafe_destinations(self) -> None:
+        _old_config, old_uri, _old_keys = _generated_pair()
+        _new_config, new_uri, _new_keys = _generated_pair()
+        with tempfile.TemporaryDirectory(prefix="transitvpn-import-replace-safe-") as directory:
+            root = Path(directory)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            old_profile = private / "old.vless"
+            new_profile = private / "new.vless"
+            old_profile.write_text(old_uri + "\n", encoding="utf-8")
+            new_profile.write_text(new_uri + "\n", encoding="utf-8")
+            old_profile.chmod(0o600)
+            new_profile.chmod(0o600)
+            output = root / "state" / "xray-client.json"
+            with mock.patch(
+                "transitvpn.import_profile.validate_configs",
+                return_value={"version": "test", "sha256": "0" * 64},
+            ):
+                import_profile(old_profile, output)
+                previous = output.read_bytes()
+                pid_record = output.parent / "tunnel-client.pid"
+                pid_record.write_text("not a valid pid record\n", encoding="ascii")
+                with self.assertRaises(ProfileImportError):
+                    import_profile(new_profile, output, replace_existing=True)
+                self.assertTrue(
+                    output.read_bytes() == previous,
+                    "lifecycle-record refusal changed the prior config",
+                )
+                self.assertEqual(
+                    pid_record.read_text(encoding="ascii"),
+                    "not a valid pid record\n",
+                )
+                pid_record.unlink()
+
+                pid_record.symlink_to(output.parent / "missing-record-target")
+                with self.assertRaises(ProfileImportError):
+                    import_profile(new_profile, output, replace_existing=True)
+                self.assertTrue(
+                    output.read_bytes() == previous,
+                    "dangling lifecycle symlink refusal changed the prior config",
+                )
+                self.assertTrue(pid_record.is_symlink())
+                pid_record.unlink()
+
+                output.chmod(0o644)
+                with self.assertRaises(ProfileImportError):
+                    import_profile(new_profile, output, replace_existing=True)
+                self.assertTrue(
+                    output.read_bytes() == previous,
+                    "unsafe-mode refusal changed the prior config",
+                )
+                output.chmod(0o600)
+                os.link(output, output.parent / "extra-link")
+                with self.assertRaises(ProfileImportError):
+                    import_profile(new_profile, output, replace_existing=True)
+                self.assertTrue(
+                    output.read_bytes() == previous,
+                    "multiple-link refusal changed the prior config",
+                )
+                (output.parent / "extra-link").unlink()
+                preserved = output.with_name("preserved-client.json")
+                output.rename(preserved)
+                output.symlink_to(preserved)
+                with self.assertRaises(ProfileImportError):
+                    import_profile(new_profile, output, replace_existing=True)
+                self.assertTrue(output.is_symlink())
+                self.assertTrue(
+                    preserved.read_bytes() == previous,
+                    "symlink destination refusal changed the original config",
+                )
+
+
 def _cli_harness(proxy_binary: str | None) -> str:
     harness = (
         "import sys; "
@@ -229,6 +384,11 @@ def test_import_profile_parser_defaults() -> None:
     args = cli.build_parser().parse_args(["import-profile", "--input", "p.vless"])
     assert args.command == "import-profile"
     assert args.socks_port == 10808
+    assert args.replace_existing is False
+    replace_args = cli.build_parser().parse_args(
+        ["import-profile", "--input", "p.vless", "--replace"]
+    )
+    assert replace_args.replace_existing is True
     client_args = cli.build_parser().parse_args(["up", "--client"])
     assert client_args.client is True
 
@@ -261,6 +421,12 @@ def test_import_cli_creates_private_client_state(tmp_path: Path) -> None:
     assert refusal.stdout == ""
     if json.loads(output.read_text(encoding="utf-8")) != config:
         raise AssertionError("refused import changed the existing client config")
+    replaced = _run_cli(
+        ["import-profile", "--input", str(profile), "--replace"], tmp_path
+    )
+    assert replaced.returncode == 0
+    assert replaced.stdout == "import-profile: client profile imported and validated\n"
+    assert replaced.stderr == ""
 
 
 def test_import_cli_rejects_invalid_socks_port_before_reading_input(tmp_path: Path) -> None:
@@ -420,6 +586,8 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
         return result
 
     profile_path = server_workdir / "private-export" / "client.vless"
+    refreshed_profile_path = server_workdir / "private-export" / "client-refreshed.vless"
+    profile_paths = [profile_path, refreshed_profile_path]
     cleanup_failed = False
     try:
         certificate_path, key_path = _write_local_target_certificate(
@@ -580,6 +748,142 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
         assert healthy_again.returncode == 0
         assert responder.request_count == 2
 
+        client_down_for_refresh = run_cli(client_workdir, "down", "--client")
+        assert client_down_for_refresh.returncode == 0
+        server_down_for_refresh = run_cli(server_workdir, "down")
+        assert server_down_for_refresh.returncode == 0
+        assert _port_is_closed(server_port)
+
+        refreshed_bootstrap = run_cli(
+            server_workdir,
+            "bootstrap",
+            "--host", _LOOPBACK,
+            "--listen", _LOOPBACK,
+            "--port", str(server_port),
+            "--socks-port", str(socks_port),
+            "--target", f"{_LOOPBACK}:{target.server_address[1]}",
+            "--server-name", server_name,
+            "--target-verified",
+            "--xray-binary", executable,
+        )
+        assert refreshed_bootstrap.returncode == 0
+        refreshed_server_config = json.loads(
+            (server_state / "xray-server.json").read_text(encoding="utf-8")
+        )
+        refreshed_client_config = json.loads(
+            (server_state / "xray-client.json").read_text(encoding="utf-8")
+        )
+        refreshed_server_config["outbounds"][0]["settings"] = {
+            "targetStrategy": "ForceIPv4",
+            "finalRules": [
+                {
+                    "action": "allow",
+                    "network": "tcp",
+                    "ip": [_LOOPBACK + "/32"],
+                    "port": str(int(responder.server_address[1])),
+                },
+                {
+                    "action": "allow",
+                    "network": "tcp",
+                    "ip": [_LOOPBACK + "/32"],
+                    "port": str(int(target.server_address[1])),
+                },
+            ],
+        }
+        xray_module.validate_configs(
+            {
+                "server": refreshed_server_config,
+                "client": refreshed_client_config,
+            },
+            binary=executable,
+        )
+        certification._write_config(
+            server_state / "xray-server.json", refreshed_server_config
+        )
+        refreshed_account = refreshed_server_config["inbounds"][0]["settings"][
+            "clients"
+        ][0]
+        refreshed_reality = refreshed_server_config["inbounds"][0][
+            "streamSettings"
+        ]["realitySettings"]
+        refreshed_client_reality = refreshed_client_config["outbounds"][0][
+            "streamSettings"
+        ]["realitySettings"]
+        generated_secrets.update(
+            (
+                refreshed_account["id"],
+                refreshed_reality["privateKey"],
+                refreshed_client_reality["publicKey"],
+                refreshed_reality["shortIds"][0],
+            )
+        )
+
+        refreshed_server_up = run_cli(server_workdir, "up")
+        assert refreshed_server_up.returncode == 0
+        _wait_port_open(server_port)
+        refreshed_export = run_cli(
+            server_workdir,
+            "export-profile",
+            "--output",
+            str(refreshed_profile_path),
+        )
+        assert refreshed_export.returncode == 0
+        if refreshed_profile_path.read_bytes() == profile_before:
+            raise AssertionError(
+                "fresh server credentials did not produce a different client profile"
+            )
+
+        old_client_up = run_cli(client_workdir, "up", "--client")
+        assert old_client_up.returncode == 0
+        _wait_port_open(socks_port)
+        old_profile_failure = run_cli(
+            client_workdir, "health", "--url", health_url, "--timeout", "2"
+        )
+        assert old_profile_failure.returncode == 1
+        old_profile_record = json.loads(old_profile_failure.stdout)
+        assert old_profile_record["health"] == "unhealthy"
+        assert old_profile_record["http_observed"] is False
+        assert responder.request_count == 2
+
+        client_down_before_replace = run_cli(client_workdir, "down", "--client")
+        assert client_down_before_replace.returncode == 0
+        assert not (
+            client_workdir / "state" / "tunnel-client.pid"
+        ).exists()
+        prior_client_config = client_config_path.read_bytes()
+        refreshed_import = run_cli(
+            client_workdir,
+            "import-profile",
+            "--input",
+            str(refreshed_profile_path),
+            "--socks-port",
+            str(socks_port),
+            "--replace",
+        )
+        assert refreshed_import.returncode == 0
+        assert refreshed_import.stdout == (
+            "import-profile: client profile imported and validated\n"
+        )
+        assert refreshed_import.stderr == ""
+        if client_config_path.read_bytes() == prior_client_config:
+            raise AssertionError(
+                "explicit profile replacement did not update the stopped client config"
+            )
+        assert stat.S_IMODE(client_config_path.stat().st_mode) == 0o600
+
+        refreshed_client_up = run_cli(client_workdir, "up", "--client")
+        assert refreshed_client_up.returncode == 0
+        _wait_port_open(socks_port)
+        refreshed_health = run_cli(
+            client_workdir, "health", "--url", health_url
+        )
+        assert refreshed_health.returncode == 0
+        refreshed_health_record = json.loads(refreshed_health.stdout)
+        assert refreshed_health_record["health"] == "healthy"
+        assert refreshed_health_record["http_observed"] is True
+        assert refreshed_health_record["route"] == "configured_socks"
+        assert responder.request_count == 3
+
         final_client_down = run_cli(client_workdir, "down", "--client")
         assert final_client_down.returncode == 0
         final_server_down = run_cli(server_workdir, "down")
@@ -625,15 +929,17 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
             except (OSError, RuntimeError):
                 cleanup_failed = True
 
-        profile_uri_text = ""
-        try:
-            if profile_path.is_file():
-                profile_uri_text = profile_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            cleanup_failed = True
+        for candidate_profile in profile_paths:
+            try:
+                if candidate_profile.is_file():
+                    profile_uri_text = candidate_profile.read_text(
+                        encoding="utf-8"
+                    ).strip()
+                    if profile_uri_text:
+                        generated_secrets.add(profile_uri_text)
+            except OSError:
+                cleanup_failed = True
         generated_secrets.add(body_secret)
-        if profile_uri_text:
-            generated_secrets.add(profile_uri_text)
         scan_values = tuple(generated_secrets)
         secret_scan_failed = any(
             secret in output for secret in scan_values for output in outputs

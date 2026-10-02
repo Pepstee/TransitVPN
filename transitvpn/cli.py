@@ -124,6 +124,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--xray-binary", default=os.environ.get("TRANSITVPN_XRAY_BIN", "xray"),
         help="Path to the pinned Xray executable",
     )
+    import_p.add_argument(
+        "--replace",
+        dest="replace_existing",
+        action="store_true",
+        help="Replace an existing stopped client config after validation",
+    )
 
     bootstrap_p = subparsers.add_parser(
         "bootstrap", help="Generate and validate matching Xray server/client configs"
@@ -346,6 +352,7 @@ def _cmd_import_profile(args: argparse.Namespace) -> int:
             Path("state") / "xray-client.json",
             socks_port=args.socks_port,
             xray_binary=args.xray_binary,
+            replace_existing=args.replace_existing,
         )
     except ProfileImportError:
         print(

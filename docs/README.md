@@ -100,8 +100,16 @@ The command reconstructs the client configuration, validates it with the pinned 
 (`--xray-binary`, default `TRANSITVPN_XRAY_BIN` or `xray`), and writes it privately as
 `state/xray-client.json` (mode 0600) with a loopback-only SOCKS listener on `--socks-port`
 (default 10808) and exactly one proxy outbound; there is no direct fallback outbound. An
-existing `state/xray-client.json` is never silently overwritten — remove or archive it
-deliberately first. The input profile file is not modified.
+existing `state/xray-client.json` is never overwritten by default. The input profile file
+is not modified.
+
+To deliberately refresh a stopped client, first run transitvpn down --client, then import the new
+profile with --replace. Replacement is permitted only for an existing private regular single-link
+config inside a private state directory, and refuses if any state/tunnel-client.pid filesystem
+entry remains (including a dangling symlink). It validates the new profile with pinned Xray
+before staging a private same-directory file and atomically replacing the old config. Validation
+and pre-commit write failures preserve the previous config. If the lifecycle record remains, run
+down --client successfully before retrying; status alone does not authorize replacement.
 
 ## Managed client lifecycle
 
