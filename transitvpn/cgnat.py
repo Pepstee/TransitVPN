@@ -70,7 +70,7 @@ def _is_cgnat(ip: str) -> bool:
     try:
         n = _ip_str_to_int(ip)
         return (n & _CGNAT_MASK) == _CGNAT_NETWORK
-    except Exception:
+    except (ValueError, IndexError):
         return False
 
 
@@ -84,7 +84,7 @@ def _is_private(ip: str) -> bool:
             or (n >> 16) == (192 << 8) | 168  # 192.168.0.0/16
             or _is_cgnat(ip)
         )
-    except Exception:
+    except (ValueError, IndexError):
         return False
 
 
@@ -95,16 +95,16 @@ def _get_local_ip() -> str | None:
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except Exception:
+    except Exception:  # noqa: BLE001 -- every local-route probe failure remains unavailable without exposing exception data.
         return None
 
 
 def _get_public_ip(timeout: float = 5.0) -> str | None:
     for url in _PUBLIC_IP_URLS:
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
                 return resp.read(64).decode().strip()
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 -- try each public-IP provider silently; errors can contain its URL.
             continue
     return None
 
@@ -117,7 +117,7 @@ def _probe_upnp(timeout: float = 2.0) -> bool:
         sock.recv(4096)
         sock.close()
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 -- all SSDP probe failures remain unavailable without logging endpoint details.
         return False
 
 
@@ -129,7 +129,7 @@ def _ssdp_location(timeout: float = 2.0) -> str | None:
         sock.sendto(_UPNP_DISCOVER.encode(), _UPNP_MULTICAST)
         data = sock.recv(4096).decode("utf-8", "replace")
         sock.close()
-    except Exception:
+    except Exception:  # noqa: BLE001 -- SSDP is optional; any probe failure remains unknown without exposing router details.
         return None
     for line in data.splitlines():
         if line.lower().startswith("location:"):
@@ -139,9 +139,9 @@ def _ssdp_location(timeout: float = 2.0) -> str | None:
 
 def _find_wan_service(description_xml: str, base_url: str) -> tuple[str, str] | None:
     """Return (control_url, service_type) for the WAN connection service."""
-    for match in re.findall(r"<service>(.*?)</service>", description_xml, re.S):
-        service_type = re.search(r"<serviceType>(.*?)</serviceType>", match, re.S)
-        control_url = re.search(r"<controlURL>(.*?)</controlURL>", match, re.S)
+    for match in re.findall(r"<service>(.*?)</service>", description_xml, re.DOTALL):
+        service_type = re.search(r"<serviceType>(.*?)</serviceType>", match, re.DOTALL)
+        control_url = re.search(r"<controlURL>(.*?)</controlURL>", match, re.DOTALL)
         if not service_type or not control_url:
             continue
         stype = service_type.group(1).strip()
@@ -169,11 +169,11 @@ def _soap_external_ip(
         req = urllib.request.Request(
             control_url, data=body, headers=headers, method="POST"
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             xml = resp.read().decode("utf-8", "replace")
-    except Exception:
+    except Exception:  # noqa: BLE001 -- malformed router URLs and network failures remain unknown; do not expose endpoint details.
         return None
-    match = re.search(r"<NewExternalIPAddress>(.*?)</NewExternalIPAddress>", xml, re.S)
+    match = re.search(r"<NewExternalIPAddress>(.*?)</NewExternalIPAddress>", xml, re.DOTALL)
     if not match:
         return None
     return match.group(1).strip() or None
@@ -185,9 +185,9 @@ def _get_router_external_ip(timeout: float = 2.0) -> str | None:
     if not location:
         return None
     try:
-        with urllib.request.urlopen(location, timeout=timeout) as resp:  # noqa: S310
+        with urllib.request.urlopen(location, timeout=timeout) as resp:
             description = resp.read().decode("utf-8", "replace")
-    except Exception:
+    except Exception:  # noqa: BLE001 -- malformed router URLs and network failures remain unknown; do not expose endpoint details.
         return None
     service = _find_wan_service(description, location)
     if not service:

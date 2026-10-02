@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import re
 import shlex
 import unittest
-
+from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNNER = PROJECT_ROOT / "scripts" / "certify-clean.sh"
@@ -68,7 +67,7 @@ class CertificationInstallBoundaryTests(unittest.TestCase):
         install_token = tokens.index("install")
         install_arguments: list[str] = []
         for token in tokens[install_token + 1 :]:
-            if token.startswith(">") or token.startswith("2>") or token == "then":
+            if token.startswith((">", "2>")) or token == "then":
                 break
             install_arguments.append(token.rstrip(";"))
 

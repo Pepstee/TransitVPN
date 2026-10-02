@@ -3,7 +3,7 @@
 import io
 import json
 import unittest
-from contextlib import redirect_stdout, redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from transitvpn import cli
@@ -75,7 +75,7 @@ class CertifyLocalTunnelDispatchTests(unittest.TestCase):
         self.assertLessEqual(len(err.strip().splitlines()), 1)
 
     def test_invalid_timeout_rejected(self):
-        code, out, err = self._run(["certify-local-tunnel", "--timeout", "-1"])
+        code, _out, err = self._run(["certify-local-tunnel", "--timeout", "-1"])
         self.assertNotEqual(code, 0)
         self.assertNotIn("Traceback", err)
 

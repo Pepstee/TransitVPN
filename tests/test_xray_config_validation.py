@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 import subprocess
 import tempfile
-from types import SimpleNamespace
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from transitvpn import cli
-from transitvpn import xray
+from transitvpn import cli, xray
 from transitvpn.config import XrayDeployment
 from transitvpn.keygen import Keys
 from transitvpn.server import build_client_config, build_server_config
@@ -166,7 +165,6 @@ raise SystemExit(23 if any(stream.get("network") == "tcp" for stream in streams)
 
         def lookup(name: str) -> None:
             self.assertEqual(name, requested)
-            return None
 
         with (
             mock.patch.object(xray, "_platform_key", return_value=self.PLATFORM),
@@ -192,7 +190,6 @@ raise SystemExit(23 if any(stream.get("network") == "tcp" for stream in streams)
 
             def lookup(name: str) -> None:
                 self.assertEqual(name, str(requested))
-                return None
 
             with (
                 mock.patch.object(xray, "_platform_key", return_value=self.PLATFORM),

@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import hmac
 import json
-from pathlib import Path
 import platform
 import re
 import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
-
 
 # Upgrade this release and every digest below together.  The executable hashes
 # are derived from the corresponding official release archives; checksum_source

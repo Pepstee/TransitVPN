@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import socket
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -274,7 +273,7 @@ class TestProbeUpnp:
 
     def test_returns_false_on_timeout(self):
         mock_sock = MagicMock()
-        mock_sock.recv.side_effect = socket.timeout("timed out")
+        mock_sock.recv.side_effect = TimeoutError("timed out")
         with patch("socket.socket", return_value=mock_sock):
             result = _probe_upnp(timeout=1.0)
         assert result is False
@@ -622,7 +621,7 @@ class TestSsdpLocation:
 
     def test_returns_none_on_timeout(self):
         mock_sock = MagicMock()
-        mock_sock.recv.side_effect = socket.timeout("timed out")
+        mock_sock.recv.side_effect = TimeoutError("timed out")
         with patch("socket.socket", return_value=mock_sock):
             assert _ssdp_location(timeout=1.0) is None
 

@@ -103,7 +103,7 @@ class _Responder(ThreadingHTTPServer):
 class _RequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
 
-    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+    def do_GET(self) -> None:
         self.server.record_request()  # type: ignore[attr-defined]
         body = self.server.response_body  # type: ignore[attr-defined]
         self.send_response(200)
@@ -580,7 +580,7 @@ def _stop(process: subprocess.Popen[bytes] | None) -> bool:
             process.kill()
             process.wait(timeout=2)
         return process.poll() is not None
-    except Exception:
+    except Exception:  # noqa: BLE001 -- teardown errors become an unconfirmed-stop result without exception details.
         return False
 
 
@@ -590,7 +590,7 @@ def _stop_all(*processes: subprocess.Popen[bytes] | None) -> None:
     for process in processes:
         try:
             stopped = _stop(process) and stopped
-        except Exception:
+        except Exception:  # noqa: BLE001 -- attempt every child; the final error is generic if any exit is unconfirmed.
             stopped = False
     if not stopped:
         raise XrayCertificationError("Xray process cleanup could not be confirmed")
@@ -601,13 +601,13 @@ def _stop_responder(responder: socketserver.TCPServer, thread: threading.Thread)
     for operation in (responder.shutdown, responder.server_close):
         try:
             operation()
-        except Exception:
+        except Exception:  # noqa: BLE001 -- try the remaining responder cleanup operations and report only failure.
             stopped = False
     try:
         thread.join(timeout=2)
         if thread.is_alive():
             stopped = False
-    except Exception:
+    except Exception:  # noqa: BLE001 -- responder shutdown failure is reported generically to preserve startup failure privacy.
         stopped = False
     return stopped
 
@@ -644,7 +644,7 @@ def certify_local_tunnel(
     except Exception as exc:
         try:
             responder.server_close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 -- keep the fixed startup error; suppress cleanup detail.
             pass
         raise XrayCertificationError("local HTTP responder could not be started") from exc
     try:
@@ -704,7 +704,7 @@ def certify_local_tunnel(
         cleanup_failed = False
         try:
             _stop_all(client_process, server_process)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- finish other cleanup and raise only the fixed cleanup error.
             cleanup_failed = True
         if not _stop_responder(responder, responder_thread):
             cleanup_failed = True

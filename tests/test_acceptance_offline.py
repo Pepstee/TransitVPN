@@ -49,6 +49,7 @@ def _run_acceptance(extra_env: dict[str, str] | None = None) -> subprocess.Compl
         cwd=str(_REPO),
         env=env,
         timeout=60,
+        check=False,
     )
 
 
@@ -151,6 +152,7 @@ class TestAcceptanceExitsZero:
             capture_output=True,
             text=True,
             cwd=str(_REPO),
+            check=False,
         )
         assert result.returncode == 0, (
             f"bash acceptance (relative) exited {result.returncode}\n"
@@ -356,6 +358,7 @@ class TestNoNetworkCallsViaSocketShim:
         result = subprocess.run(
             [sys.executable, "-c", "import socket; socket.socket().connect(('203.0.113.1', 443))"],
             env={**os.environ, **env_vars}, capture_output=True, text=True, timeout=10,
+            check=False,
         )
         assert result.returncode != 0
         assert "BLOCKED_EXTERNAL_CONNECT" in log_file.read_text()
@@ -409,7 +412,7 @@ class TestNoNetworkCallsViaSocketShim:
 
 class TestNoNetworkCallsCombinedBlocking:
     def test_exits_zero_proxy_and_shim_combined(self, shim_env) -> None:
-        env_vars, log_file = shim_env
+        env_vars, _log_file = shim_env
         env_vars = {
             **env_vars,
             "http_proxy": _INVALID_PROXY,
@@ -486,6 +489,7 @@ class TestDetectCgnatDryRunUnit:
 
     def test_dry_run_with_socket_blocked_still_works(self) -> None:
         import socket
+
         from transitvpn.cgnat import detect_cgnat
 
         def _fail_connect(self, *a, **kw):
@@ -499,6 +503,7 @@ class TestDetectCgnatDryRunUnit:
 
     def test_dry_run_with_urllib_blocked_still_works(self) -> None:
         import urllib.request
+
         from transitvpn.cgnat import detect_cgnat
 
         def _fail_urlopen(*a, **kw):
@@ -608,6 +613,7 @@ class TestCliBootstrapDryRunWiring:
 class TestGenerateKeysNoNetwork:
     def test_generate_keys_with_socket_blocked(self) -> None:
         import socket
+
         from transitvpn.keygen import generate_keys
 
         def _fail_connect(self, *a, **kw):
@@ -623,6 +629,7 @@ class TestGenerateKeysNoNetwork:
 
     def test_generate_keys_with_urlopen_blocked(self) -> None:
         import urllib.request
+
         from transitvpn.keygen import generate_keys
 
         def _fail_urlopen(*a, **kw):

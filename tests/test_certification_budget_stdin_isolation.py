@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import textwrap
 import unittest
-
+from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNNER = PROJECT_ROOT / "scripts" / "certify-clean.sh"
@@ -124,11 +123,13 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
             command = [
                 "/bin/bash",
                 "-c",
-                '"$1"; status=$?; '
-                "if IFS= read -r remaining; then "
-                "printf 'CALLER_STDIN=<%s>\\n' \"$remaining\"; "
-                "else printf 'CALLER_STDIN=<EOF>\\n'; fi; "
-                'exit "$status"',
+                (
+                    '"$1"; status=$?; '
+                    "if IFS= read -r remaining; then "
+                    "printf 'CALLER_STDIN=<%s>\\n' \"$remaining\"; "
+                    "else printf 'CALLER_STDIN=<EOF>\\n'; fi; "
+                    'exit "$status"'
+                ),
                 "certification-stdin-probe",
                 str(RUNNER),
             ]
@@ -138,8 +139,7 @@ class CertificationBudgetAndStdinTests(unittest.TestCase):
             env=env,
             input="orchestrator-control-message-must-not-be-read\n",
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=10,
             check=False,
         )

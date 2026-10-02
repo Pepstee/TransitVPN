@@ -25,7 +25,7 @@ _SHORT_ID = "a1b2c3d4"
 
 def _verified_vless_uri(keys: Keys, host: str, port: int, **overrides) -> str:
     """Supply explicit synthetic REALITY inputs for URI/QR format tests."""
-    inputs = dict(sni=_SNI, short_id=_SHORT_ID)
+    inputs = {"sni": _SNI, "short_id": _SHORT_ID}
     inputs.update(overrides)
     return make_vless_uri(keys, host, port, **inputs)
 

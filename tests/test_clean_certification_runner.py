@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import re
 import stat
 import subprocess
@@ -11,7 +10,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
-
+from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNNER = PROJECT_ROOT / "scripts" / "certify-clean.sh"
@@ -104,8 +103,7 @@ class CleanCertificationRunnerTests(unittest.TestCase):
             cwd=sandbox,
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         recorded = calls.read_text(encoding="utf-8").splitlines()
@@ -147,8 +145,10 @@ class CleanCertificationRunnerTests(unittest.TestCase):
         self.assertEqual([call.split("|ACTIVE=", 1)[0] for call in recorded], [
             f"CALL|{PROJECT_ROOT / 'scripts/scan-credentials.py'}",
             f"CALL|-m|venv|{temporary_root / 'venv'}",
-            "CALL|-m|pip|install|--disable-pip-version-check|--no-input|--quiet|"
-            f"--requirement|{PROJECT_ROOT / 'requirements-certification.lock'}",
+            (
+                "CALL|-m|pip|install|--disable-pip-version-check|--no-input|--quiet|"
+                f"--requirement|{PROJECT_ROOT / 'requirements-certification.lock'}"
+            ),
             "CALL|-m|pytest|--collect-only|-q|tests",
             "CALL|-m|pytest|-q|tests",
         ])

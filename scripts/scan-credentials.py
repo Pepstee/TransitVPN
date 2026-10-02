@@ -11,11 +11,10 @@ Diagnostics intentionally contain only the relative path and rule name.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 GENERATED_PARTS = {
@@ -36,17 +35,17 @@ PLACEHOLDER_WORDS = (
     "sentinel",
     "changeme",
 )
-ALLOW = re.compile(r"credential-scan:\s*allow\s+([a-z-]+|all)\b", re.I)
+ALLOW = re.compile(r"credential-scan:\s*allow\s+([a-z-]+|all)\b", re.IGNORECASE)
 UUID = re.compile(
     r"(?<![0-9a-f])([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
     r"[89ab][0-9a-f]{3}-[0-9a-f]{12})(?![0-9a-f])",
-    re.I,
+    re.IGNORECASE,
 )
 IMPORT_URI = re.compile(
     # credential-scan: allow client-import-uri
     r"\b(?:vless://[0-9a-f-]{36}@[^\s'\"<>]+|ss://[^\s'\"<>]{12,}"
     r"|wg://[^\s'\"<>]+)",  # credential-scan: allow client-import-uri
-    re.I,
+    re.IGNORECASE,
 )
 NAMED_SECRET = re.compile(
     r"(?imx)\b(?:password|passwd|token|secret|credential|api[_-]?key|access[_-]?key|"

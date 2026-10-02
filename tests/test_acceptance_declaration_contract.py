@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-
+from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ACCEPTANCE = PROJECT_ROOT / "acceptance"
@@ -37,8 +36,7 @@ def run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
         cwd=cwd,
         env=environment,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         timeout=10,
         check=False,

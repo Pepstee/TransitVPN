@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import textwrap
 import unittest
-
+from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNNER = PROJECT_ROOT / "scripts" / "certify-clean.sh"
@@ -111,8 +110,10 @@ class CleanCertificationCredentialGateTests(unittest.TestCase):
         command = [
             "/bin/bash",
             "-c",
-            '"$1"; status=$?; IFS= read -r remaining; '
-            "printf 'CALLER_STDIN=%s\\n' \"$remaining\"; exit \"$status\"",
+            (
+                '"$1"; status=$?; IFS= read -r remaining; '
+                "printf 'CALLER_STDIN=%s\\n' \"$remaining\"; exit \"$status\""
+            ),
             "credential-gate-probe",
             str(RUNNER),
         ]
@@ -122,8 +123,7 @@ class CleanCertificationCredentialGateTests(unittest.TestCase):
             env=env,
             input="orchestrator-message-must-remain-unread\n",
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=10,
             check=False,
         )

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import unittest
+from dataclasses import asdict
 from unittest import mock
 
 from transitvpn import xray_certification as certification

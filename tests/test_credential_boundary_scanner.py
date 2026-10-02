@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from contextlib import redirect_stderr
 import importlib.util
 import io
-from pathlib import Path
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from pathlib import Path
 from unittest import mock
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCANNER_PATH = PROJECT_ROOT / "scripts" / "scan-credentials.py"

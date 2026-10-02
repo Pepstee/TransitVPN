@@ -28,9 +28,10 @@ def deployment_with(short_id: str) -> XrayDeployment:
 class RealityShortIdValidationTests(unittest.TestCase):
     def test_deployment_rejects_odd_length_reality_short_ids(self) -> None:
         for short_id in ("0", "abc", "0123456789abcde"):
-            with self.subTest(short_id=short_id):
-                with self.assertRaisesRegex(ValueError, "short_id"):
-                    deployment_with(short_id)
+            with self.subTest(short_id=short_id), self.assertRaisesRegex(
+                ValueError, "short_id"
+            ):
+                deployment_with(short_id)
 
     def test_deployment_rejects_malformed_reality_short_ids(self) -> None:
         malformed = (
@@ -44,9 +45,10 @@ class RealityShortIdValidationTests(unittest.TestCase):
             "0123456789abcdef00",
         )
         for short_id in malformed:
-            with self.subTest(short_id=short_id):
-                with self.assertRaisesRegex(ValueError, "short_id"):
-                    deployment_with(short_id)
+            with self.subTest(short_id=short_id), self.assertRaisesRegex(
+                ValueError, "short_id"
+            ):
+                deployment_with(short_id)
 
     def test_deployment_accepts_even_length_lowercase_hex_short_ids(self) -> None:
         for short_id in ("00", "ab12", "012345", "deadbeef", "0123456789abcdef"):

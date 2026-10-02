@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import py_compile
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 from transitvpn.cgnat import CgnatResult, CgnatStatus, detect_cgnat
 from transitvpn.cli import build_parser, main
 from transitvpn.config import XrayDeployment
 from transitvpn.keygen import Keys, generate_keys
 from transitvpn.server import build_client_config, build_server_config
-
 
 for source in ("transitvpn/__init__.py", "transitvpn/cli.py"):
     py_compile.compile(source, doraise=True)

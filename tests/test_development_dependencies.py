@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
-import tomllib
 import unittest
 from pathlib import Path
 
+import tomllib
 
 PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 DEVELOPMENT_GROUP_NAMES = {"dev", "development", "test", "tests"}

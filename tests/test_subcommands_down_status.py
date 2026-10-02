@@ -34,6 +34,7 @@ def _run_module(*args: str) -> subprocess.CompletedProcess:
         [sys.executable, "-m", "transitvpn", *args],
         capture_output=True,
         text=True,
+        check=False,
         cwd=str(_REPO),
     )
 
@@ -43,6 +44,7 @@ def _run_script(*args: str) -> subprocess.CompletedProcess:
         [sys.executable, str(_REPO / "transitvpn" / "cli.py"), *args],
         capture_output=True,
         text=True,
+        check=False,
         cwd=str(_REPO),
     )
 
@@ -52,6 +54,7 @@ def _run_acceptance() -> subprocess.CompletedProcess:
         ["bash", str(_REPO / "acceptance")],
         capture_output=True,
         text=True,
+        check=False,
         cwd=str(_REPO),
     )
 
@@ -242,6 +245,7 @@ class TestDownSubcommandModule:
             [sys.executable, "-m", "transitvpn", "down"],
             capture_output=True,
             text=True,
+            check=False,
             cwd=str(tmp_path),
         )
         files_after = set(tmp_path.iterdir())
@@ -299,6 +303,7 @@ class TestStatusSubcommandModule:
             [sys.executable, "-m", "transitvpn", "status"],
             capture_output=True,
             text=True,
+            check=False,
             cwd=str(tmp_path),
         )
         files_after = set(tmp_path.iterdir())
@@ -378,9 +383,10 @@ class TestDownMainDirect:
         assert "down" in out
 
     def test_main_down_does_not_import_cgnat(self, capsys: pytest.CaptureFixture) -> None:
-        from transitvpn.cli import main
         # The stub 'down' must NOT invoke any network module (CGNAT detection etc.)
         import sys
+
+        from transitvpn.cli import main
         modules_before = set(sys.modules.keys())
         main(["down"])
         capsys.readouterr()
@@ -491,6 +497,7 @@ class TestStubSymmetry:
             [sys.executable, "-m", "transitvpn", cmd],
             capture_output=True,
             text=True,
+            check=False,
             cwd=str(tmp_path),
         )
         after = set(tmp_path.iterdir())
@@ -536,6 +543,7 @@ class TestStatusLivePidTruthfulness:
             [sys.executable, "-m", "transitvpn", "status"],
             capture_output=True,
             text=True,
+            check=False,
             cwd=str(tmp_path),
             env={**os.environ, "PYTHONPATH": str(_REPO)},
             timeout=10,

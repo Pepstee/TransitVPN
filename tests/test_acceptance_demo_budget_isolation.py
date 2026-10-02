@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DECLARATION = ROOT / "acceptance"
@@ -78,8 +77,7 @@ class AcceptanceDemoBudgetIsolationTest(unittest.TestCase):
                     cwd=cwd,
                     env=env,
                     stdin=read_fd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    capture_output=True,
                     text=True,
                     timeout=15,
                     check=False,
