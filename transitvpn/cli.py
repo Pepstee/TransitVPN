@@ -99,6 +99,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the imported client tunnel instead of the server",
     )
 
+    service_install_p = subparsers.add_parser(
+        "service-install", help="Install and start a persistent systemd user tunnel"
+    )
+    service_install_p.add_argument(
+        "--name", required=True, help="Short lowercase name for this installation"
+    )
+    service_install_p.add_argument(
+        "--client", action="store_true",
+        help="Install the imported client tunnel instead of the server",
+    )
+    service_install_p.add_argument(
+        "--xray-binary", default=os.environ.get("TRANSITVPN_XRAY_BIN", "xray"),
+        help="Path to the pinned Xray executable",
+    )
+
+    for service_command, description in (
+        ("service-start", "Start this deployment's installed user tunnel"),
+        ("service-stop", "Stop this deployment's installed user tunnel"),
+        ("service-uninstall", "Stop and remove this deployment's installed user tunnel"),
+    ):
+        service_p = subparsers.add_parser(service_command, help=description)
+        service_p.add_argument("--name", required=True, help="Short installation name")
+
     health_p = subparsers.add_parser(
         "health", help="Request HTTP health through the configured local SOCKS tunnel"
     )
@@ -342,6 +365,33 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_user_service(args: argparse.Namespace) -> int:
+    from transitvpn import user_service
+
+    try:
+        if args.command == "service-install":
+            already_installed = user_service.install(
+                args.name,
+                role="client" if args.client else "server",
+                xray_binary=args.xray_binary,
+            )
+            message = "already installed" if already_installed else "installed and started"
+        elif args.command == "service-start":
+            user_service.start(args.name)
+            message = "started"
+        elif args.command == "service-stop":
+            user_service.stop(args.name)
+            message = "stopped"
+        else:
+            user_service.uninstall(args.name)
+            message = "removed"
+    except Exception:  # noqa: BLE001 - manager diagnostics can disclose private paths
+        print(f"{args.command}: error: user service operation was refused", file=sys.stderr)
+        return 1
+    print(f"{args.command}: {message}")
+    return 0
+
+
 def _cmd_health(args: argparse.Namespace) -> int:
     from transitvpn.xray_certification import (
         XrayCertificationError,
@@ -475,6 +525,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "serve":
         return _cmd_serve(args)
+
+    if args.command in {
+        "service-install", "service-start", "service-stop", "service-uninstall"
+    }:
+        return _cmd_user_service(args)
 
     if args.command == "health":
         return _cmd_health(args)

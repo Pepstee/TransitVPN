@@ -545,6 +545,7 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
     from transitvpn import xray as xray_module
     from transitvpn import xray_certification as certification
     from transitvpn.tunnel import _identity_matches, _read_record, get_status
+    from transitvpn.user_service import _unit_paths, _user_unit_directory
 
     binary = os.environ.get("TRANSITVPN_XRAY_BIN", "xray")
     try:
@@ -557,7 +558,7 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
     server_name = "cover.example.test"
     outputs: list[str] = []
     generated_secrets: set[str] = set()
-    server_workdir = tmp_path / "server"
+    server_workdir = tmp_path / "server deployment"
     client_workdir = tmp_path / "client"
     server_workdir.mkdir(mode=0o700)
     client_workdir.mkdir(mode=0o700)
@@ -569,6 +570,13 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
     socks_port: int | None = None
     service_unit = f"transitvpn-recovery-{os.getpid()}-{secrets.token_hex(6)}.service"
     service_unit_attempted = False
+    installed_service_name = f"canary-{os.getpid()}-{secrets.token_hex(6)}"
+    installed_service_unit = f"transitvpn-{installed_service_name}.service"
+    installed_service_unit_path = (
+        server_workdir / "state" / "services" / installed_service_unit
+    )
+    installed_service_manifest_path = Path(str(installed_service_unit_path) + ".json")
+    installed_service_attempted = False
 
     def run_cli(workdir: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
@@ -1087,6 +1095,118 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
         assert _port_is_closed(server_port)
         assert run_manager("systemctl", "--user", "is-active", service_unit).returncode != 0
 
+        server_config_before_install = (server_workdir / "state" / "xray-server.json").read_bytes()
+        imported_profile_before_install = client_config_path.read_bytes()
+        install_arguments = (
+            "service-install", "--name", installed_service_name,
+            "--xray-binary", executable,
+        )
+        installed_service_attempted = True
+        install_result = run_cli(server_workdir, *install_arguments)
+        assert install_result.returncode == 0, "persistent service installation failed"
+        unit_state = run_manager(
+            "systemctl", "--user", "show", installed_service_unit,
+            "--property=LoadState", "--property=FragmentPath",
+            "--property=UnitFileState", "--property=ActiveState",
+        )
+        assert unit_state.returncode == 0
+        unit_properties = dict(
+            line.split("=", 1) for line in unit_state.stdout.splitlines() if "=" in line
+        )
+        assert unit_properties.get("LoadState") == "loaded"
+        manager_unit_path = _user_unit_directory(_unit_paths()) / installed_service_unit
+        assert unit_properties.get("FragmentPath") == str(manager_unit_path)
+        assert unit_properties.get("UnitFileState") == "enabled"
+        assert unit_properties.get("ActiveState") == "active"
+        installed_pid = wait_service_child()
+        _wait_port_open(server_port)
+        installed_health = run_cli(client_workdir, "health", "--url", health_url)
+        assert installed_health.returncode == 0
+        installed_health_record = json.loads(installed_health.stdout)
+        assert installed_health_record["health"] == "healthy"
+        assert installed_health_record["http_observed"] is True
+        assert installed_health_record["route"] == "configured_socks"
+        assert responder.request_count == 6
+        unit_bytes_before_repeat = installed_service_unit_path.read_bytes()
+        manifest_bytes_before_repeat = installed_service_manifest_path.read_bytes()
+        unit_inode_before_repeat = installed_service_unit_path.stat().st_ino
+        assert (server_workdir / "state" / "xray-server.json").read_bytes() == server_config_before_install
+        assert client_config_path.read_bytes() == imported_profile_before_install
+
+        repeated_install = run_cli(server_workdir, *install_arguments)
+        assert repeated_install.returncode == 0
+        assert "already installed" in repeated_install.stdout
+        assert wait_service_child() == installed_pid
+        assert installed_service_unit_path.stat().st_ino == unit_inode_before_repeat
+        assert installed_service_unit_path.read_bytes() == unit_bytes_before_repeat
+        assert installed_service_manifest_path.read_bytes() == manifest_bytes_before_repeat
+        assert (server_workdir / "state" / "xray-server.json").read_bytes() == server_config_before_install
+        assert client_config_path.read_bytes() == imported_profile_before_install
+        repeated_health = run_cli(client_workdir, "health", "--url", health_url)
+        assert repeated_health.returncode == 0
+        repeated_health_record = json.loads(repeated_health.stdout)
+        assert repeated_health_record["health"] == "healthy"
+        assert repeated_health_record["http_observed"] is True
+        assert repeated_health_record["route"] == "configured_socks"
+        assert responder.request_count == 7
+
+        product_stop = run_cli(
+            server_workdir, "service-stop", "--name", installed_service_name
+        )
+        assert product_stop.returncode == 0
+        time.sleep(1.25)
+        stopped_product_health = run_cli(
+            client_workdir, "health", "--url", health_url
+        )
+        assert stopped_product_health.returncode == 1
+        stopped_product_record = json.loads(stopped_product_health.stdout)
+        assert stopped_product_record["health"] == "unhealthy"
+        assert stopped_product_record["http_observed"] is False
+        assert responder.request_count == 7
+        assert get_status(str(server_workdir / "state")) == (False, None)
+        assert not (server_workdir / "state" / "tunnel.pid").exists()
+        assert _port_is_closed(server_port)
+
+        product_start = run_cli(
+            server_workdir, "service-start", "--name", installed_service_name
+        )
+        assert product_start.returncode == 0
+        restarted_installed_pid = wait_service_child(previous_pid=installed_pid)
+        _wait_port_open(server_port)
+        restarted_product_health = run_cli(
+            client_workdir, "health", "--url", health_url
+        )
+        assert restarted_product_health.returncode == 0
+        restarted_product_record = json.loads(restarted_product_health.stdout)
+        assert restarted_product_record["health"] == "healthy"
+        assert restarted_product_record["http_observed"] is True
+        assert restarted_product_record["route"] == "configured_socks"
+        assert responder.request_count == 8
+        assert client_config_path.read_bytes() == imported_profile_before_install
+
+        product_uninstall = run_cli(
+            server_workdir, "service-uninstall", "--name", installed_service_name
+        )
+        assert product_uninstall.returncode == 0
+        assert not installed_service_unit_path.exists()
+        assert not installed_service_manifest_path.exists()
+        assert not (server_workdir / "state" / "services").exists()
+        assert get_status(str(server_workdir / "state")) == (False, None)
+        assert not (server_workdir / "state" / "tunnel.pid").exists()
+        assert _wait_recorded_pid_gone(restarted_installed_pid)
+        assert _port_is_closed(server_port)
+        assert run_manager(
+            "systemctl", "--user", "show", installed_service_unit,
+            "--property=LoadState",
+        ).stdout.strip() == "LoadState=not-found"
+        assert run_manager(
+            "systemctl", "--user", "is-enabled", installed_service_unit
+        ).returncode != 0
+        from transitvpn.user_service import _entries, _unit_paths
+
+        assert not _entries(_unit_paths(), installed_service_unit)
+        installed_service_attempted = False
+
         final_client_down = run_cli(client_workdir, "down", "--client")
         assert final_client_down.returncode == 0
         final_server_down = run_cli(server_workdir, "down")
@@ -1096,6 +1216,20 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
         ) == (False, None)
         assert get_status(str(server_workdir / "state")) == (False, None)
     finally:
+        if installed_service_attempted:
+            try:
+                if (
+                    os.path.lexists(installed_service_unit_path)
+                    or os.path.lexists(installed_service_manifest_path)
+                ):
+                    cleanup = run_cli(
+                        server_workdir,
+                        "service-uninstall", "--name", installed_service_name,
+                    )
+                    if cleanup.returncode != 0:
+                        cleanup_failed = True
+            except (OSError, subprocess.SubprocessError):
+                cleanup_failed = True
         if service_unit_attempted:
             try:
                 unit_state = run_manager(

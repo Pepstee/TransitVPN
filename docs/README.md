@@ -157,8 +157,24 @@ systemd-run --user --unit=transitvpn-local --collect \
 systemctl --user stop transitvpn-local.service
 ```
 
-The bounded transient service canary exercises local crash recovery only. Boot/login persistence
-and the complete installation, upgrade, and rollback route remain unfinished.
+The bounded transient service canary exercises local crash recovery only. For a private persistent
+user-service installation, run the product commands from the deployment work directory after its
+server config exists (or use `--client` in the imported-client work directory):
+
+```console
+transitvpn service-install --name travel
+transitvpn service-install --name travel  # an exact repeat is a no-op while the unit is active
+transitvpn service-stop --name travel     # prevents Restart=on-failure from respawning it
+transitvpn service-start --name travel
+transitvpn service-uninstall --name travel
+```
+
+Installation validates the selected config with the pinned Xray before changing the user manager.
+It binds a private unit and registration to that deployment and refuses an unrelated same-name
+unit. Use `service-stop` instead of stopping the unit behind the product's back; the product checks
+the binding before requesting a stop. Uninstall removes only that unit's verified registration and
+private artifacts. The unit is registered with `default.target`, but an actual reboot/login cycle
+was not exercised and user-manager linger was not changed. Upgrade and rollback remain unfinished.
 
 ## Private configuration backup and restore
 
