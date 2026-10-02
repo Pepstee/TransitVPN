@@ -91,6 +91,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Manage the imported client tunnel instead of the server",
     )
 
+    serve_p = subparsers.add_parser(
+        "serve", help="Run one foreground tunnel for a service manager"
+    )
+    serve_p.add_argument(
+        "--client", action="store_true",
+        help="Run the imported client tunnel instead of the server",
+    )
+
     health_p = subparsers.add_parser(
         "health", help="Request HTTP health through the configured local SOCKS tunnel"
     )
@@ -305,6 +313,35 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    from transitvpn.tunnel import serve_foreground
+
+    client = bool(getattr(args, "client", False))
+    if client:
+        config_path = Path("state") / "xray-client.json"
+        pid_name = _CLIENT_PID_NAME
+        config_name = "client"
+    else:
+        config_path = Path("state") / "xray-server.json"
+        pid_name = _SERVER_PID_NAME
+        config_name = "server"
+    try:
+        exit_code, error = serve_foreground(
+            str(config_path),
+            "state",
+            config_name=config_name,
+            pid_name=pid_name,
+        )
+    except Exception:  # noqa: BLE001 - keep internal service errors out of CLI output
+        print("serve: error: foreground service failed safely", file=sys.stderr)
+        return 1
+    if error is not None:
+        print(f"serve: error: {error}", file=sys.stderr)
+        return exit_code
+    print("serve: stopped")
+    return 0
+
+
 def _cmd_health(args: argparse.Namespace) -> int:
     from transitvpn.xray_certification import (
         XrayCertificationError,
@@ -435,6 +472,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "status":
         return _cmd_status(args)
+
+    if args.command == "serve":
+        return _cmd_serve(args)
 
     if args.command == "health":
         return _cmd_health(args)

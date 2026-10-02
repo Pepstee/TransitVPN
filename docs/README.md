@@ -130,6 +130,36 @@ the other role. `health --url http://...` sends its request through the imported
 configured loopback SOCKS listener. To stop everything, run `down --client` and then `down`.
 Recovery after a crash is `down --client` (or `down`) followed by `up --client` (or `up`).
 
+## Foreground Linux service
+
+`serve` validates the selected config with pinned Xray, starts one verified tunnel process, and
+stays in the foreground. Run it under a Linux user service manager with restart-on-failure; the
+foreground command exits unsuccessfully if its tunnel child exits unexpectedly and stops only its
+verified child when the manager requests a stop. This local transient service procedure does not
+install a persistent unit or enable boot/login startup:
+
+```console
+set -eu
+TRANSITVPN_SOURCE=/absolute/path/to/TransitVPN
+TRANSITVPN_WORKDIR=/absolute/path/to/private/server-workdir
+TRANSITVPN_PYTHON=/absolute/path/to/python
+PINNED_XRAY=/absolute/path/to/pinned/xray
+systemd-run --user --unit=transitvpn-local --collect \
+  --property=WorkingDirectory="$TRANSITVPN_WORKDIR" \
+  --property=Restart=on-failure --property=RestartSec=1s \
+  --property=RuntimeMaxSec=1h \
+  --property=StartLimitIntervalSec=30s --property=StartLimitBurst=5 \
+  --property=StandardOutput=null --property=StandardError=null \
+  --setenv=PYTHONPATH="$TRANSITVPN_SOURCE" \
+  --setenv=TRANSITVPN_PROXY_BIN="$PINNED_XRAY" \
+  --setenv=TRANSITVPN_XRAY_BIN="$PINNED_XRAY" \
+  "$TRANSITVPN_PYTHON" -m transitvpn serve
+systemctl --user stop transitvpn-local.service
+```
+
+The bounded transient service canary exercises local crash recovery only. Boot/login persistence
+and the complete installation, upgrade, and rollback route remain unfinished.
+
 ## Private configuration backup and restore
 
 The primary deployment's `state/` contains long-term credentials. Use only the explicit

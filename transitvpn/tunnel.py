@@ -15,7 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from transitvpn.xray import verify_binary
+from transitvpn.xray import validate_configs, verify_binary
 
 # The marker is inherited by the verified child and checked with its live
 # kernel process identity. Only its digest is stored in tunnel.pid.
@@ -539,4 +539,158 @@ def get_status(
             return True, record["pid"]
         return False, None
     finally:
+        os.close(pidfd)
+
+
+def _reap_direct_child(pid: int, timeout: float = 1.0) -> bool:
+    """Reap the child created by start_tunnel without an unbounded wait."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            waited, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return True
+        except OSError:
+            return False
+        if waited == pid:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.025)
+
+
+def _stop_foreground_child(record: dict[str, object], pidfd: int) -> bool:
+    """Stop only the foreground command's verified child through its pidfd."""
+    if _pidfd_exited(pidfd):
+        return True
+    if not _identity_matches(record, pidfd):
+        return False
+    try:
+        _signal_pidfd(pidfd, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+
+    if not _wait_pidfd_exit(pidfd, _STOP_GRACE_SECONDS):
+        if not _identity_matches(record, pidfd):
+            return False
+        try:
+            _signal_pidfd(pidfd, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        if not _wait_pidfd_exit(pidfd, 1.0):
+            return False
+    return True
+
+
+def _wait_for_foreground_child(pidfd: int) -> None:
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+    try:
+        poller.poll(250)
+    except InterruptedError:
+        pass
+
+
+def serve_foreground(
+    config_path: str,
+    state_dir: str,
+    *,
+    config_name: str = "server",
+    pid_name: str = _DEFAULT_PID_NAME,
+) -> tuple[int, str | None]:
+    """Run one verified Xray child until it exits or this foreground owner is stopped.
+
+    A service manager may restart the command after an unexpected child exit. This
+    function deliberately has no restart loop of its own.
+    """
+    support_error = lifecycle_support_error()
+    if support_error:
+        return 1, "safe foreground service is unavailable on this platform"
+    if config_name not in {"server", "client"}:
+        return 1, "invalid foreground tunnel role"
+
+    config = Path(config_path)
+    try:
+        config_value = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return 1, "tunnel configuration could not be read"
+    if not isinstance(config_value, dict):
+        return 1, "tunnel configuration is invalid"
+
+    binary = os.environ.get("TRANSITVPN_PROXY_BIN", "xray")
+    try:
+        validate_configs({config_name: config_value}, binary=binary)
+    except (RuntimeError, ValueError, OSError, TypeError):
+        return 1, "tunnel configuration failed pinned Xray validation"
+
+    try:
+        pid, start_error = start_tunnel(
+            str(config), state_dir, pid_name=pid_name
+        )
+    except Exception:  # noqa: BLE001 - keep internal startup details out of service output
+        return 1, "verified tunnel process could not be started"
+    if start_error is not None or pid is None:
+        return 1, "verified tunnel process could not be started"
+
+    try:
+        pid_file = _pid_file_path(Path(state_dir), pid_name)
+    except ValueError:
+        return 1, "foreground process state is invalid"
+    record, original = _read_record(pid_file)
+    if record is None or original is None or record["pid"] != pid:
+        return 1, "foreground process ownership could not be verified"
+    try:
+        pidfd = os.pidfd_open(pid, 0)
+    except OSError:
+        return 1, "foreground process handle could not be opened safely"
+
+    owned = False
+    handlers: dict[int, object] = {}
+    stop_requested = False
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        nonlocal stop_requested
+        stop_requested = True
+
+    try:
+        if not _identity_matches(record, pidfd):
+            return 1, "foreground process identity could not be verified"
+        owned = True
+        handlers = {
+            signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+            signal.SIGINT: signal.getsignal(signal.SIGINT),
+        }
+        signal.signal(signal.SIGTERM, request_stop)
+        signal.signal(signal.SIGINT, request_stop)
+
+        while not stop_requested:
+            if _pidfd_exited(pidfd):
+                reaped = _reap_direct_child(pid)
+                removed = _remove_record_if_unchanged(pid_file, original)
+                if not reaped:
+                    return 1, "unexpected tunnel exit could not be reaped"
+                if not removed:
+                    return 1, "unexpected tunnel exit left changed process state"
+                return 1, "managed tunnel exited unexpectedly"
+            _wait_for_foreground_child(pidfd)
+
+        if not _stop_foreground_child(record, pidfd):
+            return 1, "verified tunnel process could not be stopped safely"
+        if not _reap_direct_child(pid):
+            return 1, "stopped tunnel process could not be reaped"
+        if not _remove_record_if_unchanged(pid_file, original):
+            return 1, "tunnel stopped but changed process state was preserved"
+        return 0, None
+    except Exception:  # noqa: BLE001 - suppress diagnostics after safe child cleanup
+        if owned and _stop_foreground_child(record, pidfd):
+            _reap_direct_child(pid)
+            _remove_record_if_unchanged(pid_file, original)
+        return 1, "foreground service stopped after an internal error"
+    finally:
+        for signum, previous in handlers.items():
+            signal.signal(signum, previous)
         os.close(pidfd)

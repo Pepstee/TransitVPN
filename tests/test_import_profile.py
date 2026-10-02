@@ -540,15 +540,17 @@ def _port_is_closed(port: int, timeout: float = 0.2) -> bool:
 
 
 def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
+    import signal
+
     from transitvpn import xray as xray_module
     from transitvpn import xray_certification as certification
-    from transitvpn.tunnel import get_status
+    from transitvpn.tunnel import _identity_matches, _read_record, get_status
 
     binary = os.environ.get("TRANSITVPN_XRAY_BIN", "xray")
     try:
         executable, _ = certification.verify_binary(binary)
-    except RuntimeError as exc:
-        pytest.skip(f"pinned Xray binary is unavailable: {exc}")
+    except RuntimeError:
+        raise AssertionError("pinned Xray binary is unavailable for the service canary") from None
 
     body_secret = secrets.token_hex(24)
     body = ("transitvpn-import-workflow:" + body_secret).encode("ascii")
@@ -565,6 +567,8 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
     target_thread = None
     server_port: int | None = None
     socks_port: int | None = None
+    service_unit = f"transitvpn-recovery-{os.getpid()}-{secrets.token_hex(6)}.service"
+    service_unit_attempted = False
 
     def run_cli(workdir: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
@@ -584,6 +588,32 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
         )
         outputs.extend((result.stdout, result.stderr))
         return result
+
+    def run_manager(*arguments: str) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            list(arguments),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        outputs.extend((result.stdout, result.stderr))
+        return result
+
+    def wait_service_child(previous_pid: int | None = None, timeout: float = 20.0) -> int:
+        deadline = time.monotonic() + timeout
+        pid_file = server_workdir / "state" / "tunnel.pid"
+        while time.monotonic() < deadline:
+            record, _raw = _read_record(pid_file)
+            if (
+                record is not None
+                and record["pid"] != previous_pid
+                and get_status(str(server_workdir / "state")) == (True, record["pid"])
+            ):
+                return record["pid"]
+            time.sleep(0.05)
+        raise AssertionError("transient service did not expose a verified Xray child")
 
     profile_path = server_workdir / "private-export" / "client.vless"
     refreshed_profile_path = server_workdir / "private-export" / "client-refreshed.vless"
@@ -972,6 +1002,91 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
         assert refreshed_health_record["route"] == "configured_socks"
         assert responder.request_count == 3
 
+        service_client_config = client_config_path.read_bytes()
+        manual_server_down = run_cli(server_workdir, "down")
+        assert manual_server_down.returncode == 0
+        assert get_status(str(server_workdir / "state")) == (False, None)
+        assert _port_is_closed(server_port)
+
+        service_unit_attempted = True
+        service_start = run_manager(
+            "systemd-run",
+            "--user",
+            f"--unit={service_unit}",
+            "--collect",
+            "--working-directory",
+            str(server_workdir),
+            "--property=RuntimeMaxSec=60s",
+            "--property=Restart=on-failure",
+            "--property=RestartSec=1s",
+            "--property=StartLimitIntervalSec=30s",
+            "--property=StartLimitBurst=5",
+            "--property=StandardOutput=null",
+            "--property=StandardError=null",
+            f"--setenv=PYTHONPATH={REPOSITORY}",
+            f"--setenv=TRANSITVPN_PROXY_BIN={executable}",
+            f"--setenv=TRANSITVPN_XRAY_BIN={executable}",
+            sys.executable,
+            "-m",
+            "transitvpn",
+            "serve",
+        )
+        assert service_start.returncode == 0, "transient user service could not be started"
+        first_service_pid = wait_service_child()
+        assert run_manager("systemctl", "--user", "is-active", service_unit).returncode == 0
+        _wait_port_open(server_port)
+        service_health = run_cli(client_workdir, "health", "--url", health_url)
+        assert service_health.returncode == 0
+        service_health_record = json.loads(service_health.stdout)
+        assert service_health_record["health"] == "healthy"
+        assert service_health_record["http_observed"] is True
+        assert service_health_record["route"] == "configured_socks"
+        assert responder.request_count == 4
+
+        service_record, _service_record_bytes = _read_record(
+            server_workdir / "state" / "tunnel.pid"
+        )
+        if service_record is None or service_record["pid"] != first_service_pid:
+            raise AssertionError("service child ownership record changed before crash test")
+        service_pidfd = os.pidfd_open(first_service_pid, 0)
+        try:
+            if not _identity_matches(service_record, service_pidfd):
+                raise AssertionError("service child identity could not be verified")
+            signal.pidfd_send_signal(service_pidfd, signal.SIGKILL)
+        finally:
+            os.close(service_pidfd)
+
+        recovered_service_pid = wait_service_child(previous_pid=first_service_pid)
+        assert recovered_service_pid != first_service_pid
+        assert run_manager("systemctl", "--user", "is-active", service_unit).returncode == 0
+        _wait_port_open(server_port)
+        recovered_service_health = run_cli(
+            client_workdir, "health", "--url", health_url
+        )
+        assert recovered_service_health.returncode == 0
+        recovered_service_record = json.loads(recovered_service_health.stdout)
+        assert recovered_service_record["health"] == "healthy"
+        assert recovered_service_record["http_observed"] is True
+        assert recovered_service_record["route"] == "configured_socks"
+        assert responder.request_count == 5
+        if client_config_path.read_bytes() != service_client_config:
+            raise AssertionError("service recovery changed the imported client config")
+
+        service_stop = run_manager("systemctl", "--user", "stop", service_unit)
+        assert service_stop.returncode == 0, "transient service stop failed"
+        service_unit_attempted = False
+        time.sleep(1.25)
+        stopped_health = run_cli(client_workdir, "health", "--url", health_url)
+        assert stopped_health.returncode == 1
+        stopped_health_record = json.loads(stopped_health.stdout)
+        assert stopped_health_record["health"] == "unhealthy"
+        assert stopped_health_record["http_observed"] is False
+        assert responder.request_count == 5
+        assert get_status(str(server_workdir / "state")) == (False, None)
+        assert not (server_workdir / "state" / "tunnel.pid").exists()
+        assert _port_is_closed(server_port)
+        assert run_manager("systemctl", "--user", "is-active", service_unit).returncode != 0
+
         final_client_down = run_cli(client_workdir, "down", "--client")
         assert final_client_down.returncode == 0
         final_server_down = run_cli(server_workdir, "down")
@@ -981,6 +1096,20 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
         ) == (False, None)
         assert get_status(str(server_workdir / "state")) == (False, None)
     finally:
+        if service_unit_attempted:
+            try:
+                unit_state = run_manager(
+                    "systemctl", "--user", "is-active", service_unit
+                )
+                if (
+                    unit_state.returncode == 0
+                    or unit_state.stdout.strip() in {"activating", "deactivating"}
+                ) and run_manager(
+                    "systemctl", "--user", "stop", service_unit
+                ).returncode != 0:
+                    cleanup_failed = True
+            except (OSError, subprocess.SubprocessError):
+                cleanup_failed = True
         for workdir, arguments in (
             (client_workdir, ("down", "--client")),
             (server_workdir, ("down",)),

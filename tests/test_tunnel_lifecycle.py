@@ -19,6 +19,7 @@ import pytest
 from transitvpn import tunnel
 from transitvpn.tunnel import get_status, start_tunnel, stop_tunnel
 
+
 def _write_test_binary(path: Path, body: str = "import time; time.sleep(30)") -> str:
     # The exact launched script stays in argv; no exec-sleep wrapper can pass
     # the verified-launch identity check.
@@ -102,6 +103,7 @@ def _run_cli(cmd: str, workdir: Path, proxy_binary: str) -> subprocess.Completed
         cwd=str(workdir),
         env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
         timeout=15,
+        check=False,
     )
 
 
@@ -727,12 +729,230 @@ class TestStopTunnel:
 # ---------------------------------------------------------------------------
 
 
-class TestGetStatus:
+class TestGetStatusNoStateDir:
     def test_not_running_when_no_state_dir(self, state_dir: str) -> None:
         running, pid = get_status(state_dir)
         assert running is False
         assert pid is None
 
+
+class TestForegroundService:
+    def test_invalid_xray_config_is_rejected_before_spawn(
+        self,
+        config_file: str,
+        state_dir: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[bool] = []
+
+        def invalid_config(_configs: object, *, binary: str) -> dict[str, str]:
+            raise RuntimeError("private Xray diagnostic")
+
+        monkeypatch.setattr(tunnel, "validate_configs", invalid_config)
+        monkeypatch.setattr(
+            tunnel,
+            "start_tunnel",
+            lambda *_args, **_kwargs: calls.append(True),
+        )
+
+        result = tunnel.serve_foreground(config_file, state_dir)
+
+        assert result == (1, "tunnel configuration failed pinned Xray validation")
+        assert calls == []
+
+    def test_unverified_process_is_never_signaled(
+        self,
+        config_file: str,
+        state_dir: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        sends: list[int] = []
+        record = {"pid": child.pid}
+        monkeypatch.setattr(tunnel, "validate_configs", lambda *_args, **_kwargs: {})
+        monkeypatch.setattr(
+            tunnel,
+            "start_tunnel",
+            lambda *_args, **_kwargs: (child.pid, None),
+        )
+        monkeypatch.setattr(tunnel, "_read_record", lambda _path: (record, b"test-record"))
+        monkeypatch.setattr(tunnel, "_identity_matches", lambda *_args: False)
+        monkeypatch.setattr(
+            tunnel, "_signal_pidfd", lambda _pidfd, signum: sends.append(signum)
+        )
+        try:
+            result = tunnel.serve_foreground(config_file, state_dir)
+            assert result == (1, "foreground process identity could not be verified")
+            assert sends == []
+            assert child.poll() is None
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+
+    def test_unexpected_owned_child_exit_is_failure_and_reaped(
+        self,
+        tmp_path: Path,
+        config_file: str,
+        state_dir: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        executable = _write_test_binary(
+            tmp_path / "short-lived-proxy", "import time; time.sleep(0.45)"
+        )
+        monkeypatch.setattr(tunnel, "verify_binary", lambda _binary: (executable, None))
+        monkeypatch.setattr(tunnel, "validate_configs", lambda *_args, **_kwargs: {})
+        started: list[int] = []
+        real_start = tunnel.start_tunnel
+
+        def capture_start(*args: object, **kwargs: object) -> tuple[int | None, str | None]:
+            result = real_start(*args, **kwargs)
+            if result[0] is not None:
+                started.append(result[0])
+            return result
+
+        monkeypatch.setattr(tunnel, "start_tunnel", capture_start)
+        result = tunnel.serve_foreground(config_file, state_dir)
+
+        assert result == (1, "managed tunnel exited unexpectedly")
+        assert started
+        assert not (Path(state_dir) / "tunnel.pid").exists()
+        assert not _process_is_alive(started[0])
+
+    @pytest.mark.parametrize("changed_record", [False, True])
+    def test_requested_stop_cleans_owned_child_and_restores_handlers(
+        self,
+        tmp_path: Path,
+        config_file: str,
+        state_dir: str,
+        changed_record: bool,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import threading
+
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        state_path = Path(state_dir)
+        state_path.mkdir(parents=True, exist_ok=True)
+        pid_path = state_path / "tunnel.pid"
+        initial_record = b"verified-test-record\n"
+        pid_path.write_bytes(initial_record)
+        record = {"pid": child.pid}
+        previous_handlers = {
+            signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+            signal.SIGINT: signal.getsignal(signal.SIGINT),
+        }
+        handlers_installed = threading.Event()
+        real_signal = signal.signal
+
+        def record_handler(signum: int, handler: object) -> object:
+            previous = real_signal(signum, handler)
+            if signum == signal.SIGINT and callable(handler):
+                handlers_installed.set()
+            return previous
+
+        monkeypatch.setattr(tunnel.signal, "signal", record_handler)
+        monkeypatch.setattr(tunnel, "validate_configs", lambda *_args, **_kwargs: {})
+        monkeypatch.setattr(
+            tunnel,
+            "start_tunnel",
+            lambda *_args, **_kwargs: (child.pid, None),
+        )
+        monkeypatch.setattr(
+            tunnel,
+            "_read_record",
+            lambda _path: (record, initial_record),
+        )
+        monkeypatch.setattr(tunnel, "_identity_matches", lambda *_args: True)
+        if changed_record:
+            def preserve_replacement(path: Path, _original: bytes) -> bool:
+                path.write_bytes(b"replacement-state\n")
+                return False
+
+            monkeypatch.setattr(tunnel, "_remove_record_if_unchanged", preserve_replacement)
+
+        request_result: list[str] = []
+
+        def request_stop() -> None:
+            if not handlers_installed.wait(5):
+                request_result.append("handler-not-installed")
+                return
+            os.kill(os.getpid(), signal.SIGTERM)
+            request_result.append("sent")
+
+        requester = threading.Thread(target=request_stop, daemon=True)
+        requester.start()
+        try:
+            result = tunnel.serve_foreground(config_file, state_dir)
+            requester.join(timeout=5)
+            assert request_result == ["sent"]
+            assert not _process_is_alive(child.pid)
+            if changed_record:
+                assert result == (1, "tunnel stopped but changed process state was preserved")
+                assert pid_path.read_bytes() == b"replacement-state\n"
+            else:
+                assert result == (0, None)
+                assert not pid_path.exists()
+            assert {
+                signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+                signal.SIGINT: signal.getsignal(signal.SIGINT),
+            } == previous_handlers
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+
+    def test_cli_hides_internal_failure_and_closes_owned_pidfd(
+        self,
+        fake_bin: None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import transitvpn.tunnel as tunnel_module
+        from transitvpn.cli import main
+
+        monkeypatch.chdir(tmp_path)
+        state_path = tmp_path / "state"
+        state_path.mkdir()
+        (state_path / "xray-server.json").write_text(json.dumps({"server": "fake"}))
+        monkeypatch.setattr(tunnel_module, "validate_configs", lambda *_args, **_kwargs: {})
+        tracked_fds: list[int] = []
+        real_pidfd_open = tunnel_module.os.pidfd_open
+
+        def capture_pidfd(pid: int, flags: int) -> int:
+            fd = real_pidfd_open(pid, flags)
+            tracked_fds.append(fd)
+            return fd
+
+        monkeypatch.setattr(tunnel_module.os, "pidfd_open", capture_pidfd)
+
+        monkeypatch.setattr(
+            tunnel_module,
+            "_wait_for_foreground_child",
+            lambda _pidfd: (_ for _ in ()).throw(RuntimeError("private poll diagnostic")),
+        )
+        exit_code = main(["serve"])
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        assert captured.out == ""
+        assert captured.err == "serve: error: foreground service stopped after an internal error\n"
+        assert "private poll diagnostic" not in captured.err
+        assert not (state_path / "tunnel.pid").exists()
+        assert tracked_fds
+        for fd in tracked_fds:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+
+
+class TestGetStatus:
     def test_not_running_when_no_pid_file(self, state_dir: str) -> None:
         Path(state_dir).mkdir(parents=True)
         running, pid = get_status(state_dir)
@@ -742,7 +962,7 @@ class TestGetStatus:
     def test_running_true_after_start(
         self, fake_bin: None, config_file: str, state_dir: str
     ) -> None:
-        start_pid, err = start_tunnel(config_file, state_dir)
+        _start_pid, err = start_tunnel(config_file, state_dir)
         try:
             assert err is None
             running, _ = get_status(state_dir)
@@ -991,6 +1211,7 @@ class TestCLILifecycle:
                     cwd=str(workdir),
                     env=env,
                     timeout=20,
+                    check=False,
                 )
 
             def wait_server_ready(timeout: float = 10.0) -> None:
