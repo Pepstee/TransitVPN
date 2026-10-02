@@ -109,6 +109,36 @@ longer needed. The URI does not encode custom DNS, routing, or application polic
 in the receiving client; this export does not establish DNS leak protection or prove that a Mac or
 phone application imported the profile successfully.
 
+## Export an offline client recovery pack
+
+After `bootstrap` has created `state/xray-client.json`, run this command from that server
+deployment's work directory. The parent must already exist, belong to the current user, and have
+mode 0700. Create it once; if it already exists, verify its owner and mode instead of rerunning
+`mkdir`. Choose a new child path for each pack; the command creates that directory with mode 0700
+and writes exactly `client.vless` and `RECOVERY.txt`, both mode 0600:
+
+```console
+set -eu
+umask 077
+SERVER_WORKDIR=/absolute/path/to/server-deployment
+PACK_PARENT="$HOME/transitvpn-recovery-packs"
+# One-time setup only; if the parent exists, verify owner and mode 0700.
+mkdir -m 700 "$PACK_PARENT"
+PACK="$PACK_PARENT/recovery-$(date -u +%Y%m%dT%H%M%SZ)"
+( cd "$SERVER_WORKDIR" && transitvpn export-recovery-pack --destination "$PACK" )
+```
+
+The pack contains a reusable client credential and a static recovery guide. It contains no server
+secrets, installer, Xray binary, or second endpoint; it is not a server backup. Keep the pack
+private and never display, paste, or log `client.vless`. Recovery requires the installed
+TransitVPN CLI and pinned Xray 26.7.11. Follow the pack's `RECOVERY.txt` for missing-config and
+existing-config import, restart, and health steps, and see [Import a client profile](#import-a-client-profile)
+for the receiving directory's product import route. Lifecycle commands are supported on Linux
+with pidfd support. Mac and phone app import, traffic, DNS, and restart behavior remain unverified.
+The URI carries no custom DNS, routing, or application policy. Before trusting a device app,
+configure its direct/bypass fallback controls to disabled and verify the app's failure behavior on
+that device and network.
+
 ## Import a client profile
 
 On the machine that should run the tunnel client, import an exported profile through the
@@ -208,7 +238,10 @@ It binds a private unit and registration to that deployment and refuses an unrel
 unit. Use `service-stop` instead of stopping the unit behind the product's back; the product checks
 the binding before requesting a stop. Uninstall removes only that unit's verified registration and
 private artifacts. The unit is registered with `default.target`, but an actual reboot/login cycle
-was not exercised and user-manager linger was not changed. Upgrade and rollback remain unfinished.
+was not exercised and user-manager linger was not changed. Application-source upgrade and rollback
+are documented in [Offline application source upgrade and rollback](#offline-application-source-upgrade-and-rollback).
+Those commands change tracked application files only; they do not manage the service, dependencies,
+or Xray version.
 
 ## Private configuration backup and restore
 
@@ -294,8 +327,10 @@ UNIT_NAME=travel
 ```
 
 Replace the placeholders with the actual private paths and configured loopback health port.
-This restores configuration only; software-version rollback and boot/login behavior are not
-established. Restoring old credentials may re-enable access they previously granted.
+This procedure restores configuration only. Application-source upgrade and rollback are a
+separate documented operation and were verified locally; they do not roll back dependencies or
+the Xray version. Dependency/Xray-version rollback and boot/login behavior remain unverified.
+Restoring old credentials may re-enable access they previously granted.
 
 The directory is trusted storage for reusable long-term credentials. In-process SHA-256
 comparisons detect copy changes; they do not authenticate an untrusted backup. Protect the
