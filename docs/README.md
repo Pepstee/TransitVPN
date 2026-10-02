@@ -116,6 +116,27 @@ External endpoint reachability, phone or Mac app import, DNS leak guarantees, an
 from Beijing are unverified. The profile carries the supported peer settings only, not
 arbitrary DNS or routing policy.
 
+## Opt-in Internet egress canary
+
+`tests/test_internet_egress_canary.py` is skipped by default so offline test runs stay
+offline; a skipped canary is never treated as passed. To authorise its bounded remote
+requests, set `TRANSITVPN_EGRESS_CANARY=1` and run the test with the pinned Xray binary:
+
+```console
+TRANSITVPN_EGRESS_CANARY=1 pytest tests/test_internet_egress_canary.py
+```
+
+The opted-in canary keeps the managed server inbound, the imported client SOCKS listener
+and the fresh TLS 1.3 REALITY cover fixture on IPv4 127.0.0.1. It sends two bounded,
+unauthenticated `GET https://example.com/` requests on TCP 443 through the imported
+client's loopback SOCKS listener with an ordinary `curl` client, using `socks5h` and
+certificate verification, with no redirects or POSTs. The first and the post-restart
+request must both return HTTPS 200; an intervening request while the server is down must
+fail while the client remains live. Fixture routing sends only `full:example.com` TCP
+443 to a uniquely tagged IPv4 freedom outbound and sends all other routed traffic to a
+blackhole outbound. No public or LAN listener is opened. It does not demonstrate remote
+VPN ingress, phone or Mac import, DNS leak guarantees, or reachability from Beijing.
+
 ## Local checks and limits
 
 `status` (server) and `status --client` (imported client) report whether the managed process appears live; they do not verify HTTP tunnel health.
