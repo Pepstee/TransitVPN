@@ -2,25 +2,26 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
 import math
-from pathlib import Path
 import secrets
+import select
 import socket
 import socketserver
+import ssl
 import subprocess
 import tempfile
 import threading
 import time
 import uuid
+from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
 from transitvpn.xray import XRAY_VERSION, validate_configs, verify_binary
-
 
 _LOOPBACK = "127.0.0.1"
 
@@ -223,6 +224,34 @@ def _set_remaining_timeout(connection: socket.socket, deadline: float) -> None:
     connection.settimeout(remaining)
 
 
+def _complete_tls_handshake(
+    connection: ssl.SSLSocket, deadline: float
+) -> None:
+    """Complete verified TLS without extending the SOCKS request deadline."""
+    connection.setblocking(False)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise XrayCertificationError("application-data tunnel probe timed out")
+        try:
+            connection.do_handshake()
+            break
+        except ssl.SSLWantReadError:
+            readable, _, _ = select.select([connection], [], [], remaining)
+            if not readable:
+                raise XrayCertificationError(
+                    "application-data tunnel probe timed out"
+                ) from None
+        except ssl.SSLWantWriteError:
+            _, writable, _ = select.select([], [connection], [], remaining)
+            if not writable:
+                raise XrayCertificationError(
+                    "application-data tunnel probe timed out"
+                ) from None
+    connection.setblocking(True)
+    _set_remaining_timeout(connection, deadline)
+
+
 def _receive_exact(connection: socket.socket, count: int, deadline: float | None = None) -> bytes:
     data = bytearray()
     while len(data) < count:
@@ -244,58 +273,89 @@ def _http_request_over_socks(
     host_header: str,
     timeout: float,
     *,
+    scheme: str,
+    tls_server_name: str,
     target_label: str,
 ) -> tuple[int, bytes]:
     deadline = time.monotonic() + timeout
+    tls_connection: ssl.SSLSocket | None = None
     try:
-        with socket.create_connection((socks_host, socks_port), timeout=timeout) as connection:
-            _set_remaining_timeout(connection, deadline)
-            connection.sendall(b"\x05\x01\x00")
-            if _receive_exact(connection, 2, deadline) != b"\x05\x00":
-                raise XrayCertificationError("client SOCKS endpoint rejected no-auth negotiation")
-
-            try:
-                address = ipaddress.ip_address(target_host)
-            except ValueError:
-                try:
-                    hostname = target_host.encode("idna")
-                except UnicodeError as exc:
-                    raise XrayCertificationError("HTTP target hostname is invalid") from exc
-                if not hostname or len(hostname) > 255:
-                    raise XrayCertificationError("HTTP target hostname is invalid")
-                address_type = b"\x03" + bytes((len(hostname),)) + hostname
-            else:
-                address_type = (b"\x01" if address.version == 4 else b"\x04") + address.packed
-            request = b"\x05\x01\x00" + address_type + target_port.to_bytes(2, "big")
-            connection.sendall(request)
-            reply = _receive_exact(connection, 4, deadline)
-            if reply[0] != 5 or reply[1] != 0:
-                raise XrayCertificationError(
-                    f"client SOCKS endpoint could not reach the {target_label}"
-                )
-            address_size = {1: 4, 4: 16}.get(reply[3])
-            if reply[3] == 3:
-                address_size = _receive_exact(connection, 1, deadline)[0]
-            if address_size is None:
-                raise XrayCertificationError("client SOCKS endpoint returned an invalid address")
-            _receive_exact(connection, address_size + 2, deadline)
-
-            _set_remaining_timeout(connection, deadline)
-            request_line = f"GET {request_target} HTTP/1.0\r\nHost: {host_header}\r\nConnection: close\r\n\r\n"
-            connection.sendall(request_line.encode("ascii"))
-            response = bytearray()
-            while True:
+        try:
+            with socket.create_connection(
+                (socks_host, socks_port), timeout=timeout
+            ) as raw_connection:
+                connection: socket.socket = raw_connection
                 _set_remaining_timeout(connection, deadline)
-                chunk = connection.recv(4096)
-                if not chunk:
-                    break
-                if len(response) + len(chunk) > 1_048_576:
-                    raise XrayCertificationError("HTTP health response exceeded the bounded size")
-                response.extend(chunk)
-    except XrayCertificationError:
-        raise
-    except Exception as exc:
-        raise XrayCertificationError("application-data tunnel probe failed") from exc
+                connection.sendall(b"\x05\x01\x00")
+                if _receive_exact(connection, 2, deadline) != b"\x05\x00":
+                    raise XrayCertificationError("client SOCKS endpoint rejected no-auth negotiation")
+
+                try:
+                    address = ipaddress.ip_address(target_host)
+                except ValueError:
+                    try:
+                        hostname = target_host.encode("idna")
+                    except UnicodeError as exc:
+                        raise XrayCertificationError("HTTP target hostname is invalid") from exc
+                    if not hostname or len(hostname) > 255:
+                        raise XrayCertificationError("HTTP target hostname is invalid")
+                    address_type = b"\x03" + bytes((len(hostname),)) + hostname
+                else:
+                    address_type = (b"\x01" if address.version == 4 else b"\x04") + address.packed
+                request = b"\x05\x01\x00" + address_type + target_port.to_bytes(2, "big")
+                connection.sendall(request)
+                reply = _receive_exact(connection, 4, deadline)
+                if reply[0] != 5 or reply[1] != 0:
+                    raise XrayCertificationError(
+                        f"client SOCKS endpoint could not reach the {target_label}"
+                    )
+                address_size = {1: 4, 4: 16}.get(reply[3])
+                if reply[3] == 3:
+                    address_size = _receive_exact(connection, 1, deadline)[0]
+                if address_size is None:
+                    raise XrayCertificationError("client SOCKS endpoint returned an invalid address")
+                _receive_exact(connection, address_size + 2, deadline)
+
+                if scheme == "https":
+                    try:
+                        _set_remaining_timeout(connection, deadline)
+                        tls_context = ssl.create_default_context()
+                        tls_connection = tls_context.wrap_socket(
+                            raw_connection,
+                            server_hostname=tls_server_name,
+                            do_handshake_on_connect=False,
+                        )
+                        connection = tls_connection
+                        _complete_tls_handshake(tls_connection, deadline)
+                    except XrayCertificationError:
+                        raise
+                    except (OSError, ssl.SSLError, ValueError):
+                        raise XrayCertificationError(
+                            "verified HTTPS tunnel probe failed"
+                        ) from None
+
+                _set_remaining_timeout(connection, deadline)
+                request_line = f"GET {request_target} HTTP/1.0\r\nHost: {host_header}\r\nConnection: close\r\n\r\n"
+                connection.sendall(request_line.encode("ascii"))
+                response = bytearray()
+                while True:
+                    _set_remaining_timeout(connection, deadline)
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        break
+                    if len(response) + len(chunk) > 1_048_576:
+                        raise XrayCertificationError("HTTP health response exceeded the bounded size")
+                    response.extend(chunk)
+        except XrayCertificationError:
+            raise
+        except Exception as exc:
+            raise XrayCertificationError("application-data tunnel probe failed") from exc
+    finally:
+        if tls_connection is not None:
+            try:
+                tls_connection.close()
+            except OSError:
+                pass
 
     header, separator, body = bytes(response).partition(b"\r\n\r\n")
     if not separator:
@@ -414,7 +474,7 @@ def probe_configured_socks_http(
     *,
     timeout: float = 5.0,
 ) -> SocksHTTPObservation:
-    """Observe an HTTP response through the configured loopback SOCKS client.
+    """Observe an HTTP or HTTPS response through the configured loopback SOCKS client.
 
     Only the local SOCKS listener is connected to directly. The target host is
     carried in the SOCKS CONNECT request so its DNS and route stay behind Xray.
@@ -437,11 +497,18 @@ def probe_configured_socks_http(
         raise ValueError("URL is invalid")
     try:
         parsed = urlsplit(url)
-        port = parsed.port if parsed.port is not None else 80
+        scheme = parsed.scheme.lower()
+        port = parsed.port if parsed.port is not None else (
+            443 if scheme == "https" else 80
+        )
     except ValueError as exc:
         raise ValueError("URL is invalid") from exc
-    if parsed.scheme.lower() != "http" or parsed.username is not None or parsed.password is not None:
-        raise ValueError("health URL must be plain HTTP without user information")
+    if (
+        scheme not in {"http", "https"}
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError("health URL must use HTTP or HTTPS without user information")
     if parsed.fragment or not parsed.hostname:
         raise ValueError("health URL must include a host and no fragment")
     if not 1 <= port <= 65535:
@@ -474,6 +541,8 @@ def probe_configured_socks_http(
         request_target,
         host_header,
         timeout,
+        scheme=scheme,
+        tls_server_name=host_ascii,
         target_label="health target",
     )
     return SocksHTTPObservation(status_code=status, response_bytes=len(body))
@@ -488,6 +557,8 @@ def _probe(socks_port: int, upstream_port: int, expected_body: bytes, timeout: f
         "/certify",
         "local",
         timeout,
+        scheme="http",
+        tls_server_name="localhost",
         target_label="the responder",
     )
     if status != 200 or body != expected_body:

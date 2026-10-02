@@ -5,14 +5,15 @@ explicitly sets TRANSITVPN_EGRESS_CANARY=1, and a skipped canary is never
 treated as passed. When opted in, the managed server inbound, the imported
 client SOCKS listener and a fresh TLS 1.3 REALITY cover fixture all stay on
 IPv4 127.0.0.1, and exactly one kind of remote request is made: a bounded,
-unauthenticated GET to https://example.com/ on TCP 443 through the client's
-loopback SOCKS listener with an ordinary curl client, using socks5h so DNS
-resolves behind the tunnel, with certificate verification enabled and no
-redirects or POSTs. No public or LAN listener is opened.
+unauthenticated GETs to https://example.com/ on TCP 443 through the client's
+loopback SOCKS listener, using curl with socks5h and the product health CLI.
+Both clients verify certificates; neither follows redirects or sends POSTs. No
+public or LAN listener is opened.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import ssl
@@ -52,6 +53,9 @@ _PROXY_ENV_KEYS = (
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY",
     "no_proxy", "NO_PROXY",
 )
+_CA_OVERRIDE_ENV_KEYS = (
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
+)
 _POSITIVE_MAX_TIME = 20.0
 _NEGATIVE_MAX_TIME = 10.0
 _CLI_TIMEOUT = 30
@@ -60,7 +64,12 @@ _CLI_TIMEOUT = 30
 def _curl_environment() -> dict[str, str]:
     """Drop every proxy selector and curl configuration source."""
     environment = dict(os.environ)
-    for name in (*_PROXY_ENV_KEYS, "CURL_HOME", "XDG_CONFIG_HOME"):
+    for name in (
+        *_PROXY_ENV_KEYS,
+        *_CA_OVERRIDE_ENV_KEYS,
+        "CURL_HOME",
+        "XDG_CONFIG_HOME",
+    ):
         environment.pop(name, None)
     return environment
 
@@ -124,17 +133,18 @@ def test_opt_in_real_internet_https_egress_canary(tmp_path: Path) -> None:
     socks_port: int | None = None
 
     def run_cli(workdir: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+        environment = _curl_environment()
+        environment.update({
+            "PYTHONPATH": str(REPOSITORY),
+            "TRANSITVPN_PROXY_BIN": executable,
+            "TRANSITVPN_XRAY_BIN": executable,
+        })
         result = subprocess.run(
             [sys.executable, "-m", "transitvpn", *arguments],
             capture_output=True,
             text=True,
             cwd=str(workdir),
-            env={
-                **os.environ,
-                "PYTHONPATH": str(REPOSITORY),
-                "TRANSITVPN_PROXY_BIN": executable,
-                "TRANSITVPN_XRAY_BIN": executable,
-            },
+            env=environment,
             timeout=_CLI_TIMEOUT,
             stdin=subprocess.DEVNULL,
             check=False,
@@ -142,7 +152,11 @@ def test_opt_in_real_internet_https_egress_canary(tmp_path: Path) -> None:
         outputs.extend((result.stdout, result.stderr))
         return result
 
+    curl_attempts: list[str] = []
+    health_attempts: list[str] = []
+
     def assert_https_ok(socks: int, label: str) -> None:
+        curl_attempts.append(label)
         request = _curl_through_client_socks(curl, socks, max_time=_POSITIVE_MAX_TIME)
         outputs.extend((request.stdout, request.stderr))
         assert request.returncode == 0, label + " egress request failed"
@@ -151,11 +165,37 @@ def test_opt_in_real_internet_https_egress_canary(tmp_path: Path) -> None:
         )
 
     def assert_https_unavailable(socks: int, label: str) -> None:
+        curl_attempts.append(label)
         request = _curl_through_client_socks(curl, socks, max_time=_NEGATIVE_MAX_TIME)
         outputs.extend((request.stdout, request.stderr))
         assert request.returncode != 0, (
             label + " egress unexpectedly succeeded without the managed server"
         )
+
+    def assert_health_ok(workdir: Path, label: str) -> None:
+        health_attempts.append(label)
+        result = run_cli(
+            workdir, "health", "--url", _EGRESS_URL, "--timeout", str(_POSITIVE_MAX_TIME)
+        )
+        assert result.returncode == 0, label + " product health request failed"
+        record = json.loads(result.stdout)
+        assert record["health"] == "healthy"
+        assert record["http_observed"] is True
+        assert record["http_status"] == 200
+        assert record["route"] == "configured_socks"
+        assert record["process_liveness"] == "not_checked"
+
+    def assert_health_unavailable(workdir: Path, label: str) -> None:
+        health_attempts.append(label)
+        result = run_cli(
+            workdir, "health", "--url", _EGRESS_URL, "--timeout", str(_NEGATIVE_MAX_TIME)
+        )
+        assert result.returncode == 1
+        record = json.loads(result.stdout)
+        assert record["health"] == "unhealthy"
+        assert record["http_observed"] is False
+        assert record["route"] == "configured_socks"
+        assert record["process_liveness"] == "not_checked"
 
     cleanup_failed = False
     try:
@@ -262,17 +302,22 @@ def test_opt_in_real_internet_https_egress_canary(tmp_path: Path) -> None:
         _wait_port_open(socks_port)
 
         assert_https_ok(socks_port, "initial")
+        assert_health_ok(client_workdir, "initial")
 
         server_down = run_cli(server_workdir, "down")
         assert server_down.returncode == 0
         client_status = run_cli(client_workdir, "status", "--client")
         assert "status: live process (pid=" in client_status.stdout
         assert_https_unavailable(socks_port, "server-down")
+        assert_health_unavailable(client_workdir, "server-down")
 
         server_up_again = run_cli(server_workdir, "up")
         assert server_up_again.returncode == 0
         _wait_port_open(server_port)
         assert_https_ok(socks_port, "restored")
+        assert_health_ok(client_workdir, "restored")
+        assert curl_attempts == ["initial", "server-down", "restored"]
+        assert health_attempts == ["initial", "server-down", "restored"]
 
         final_client_down = run_cli(client_workdir, "down", "--client")
         assert final_client_down.returncode == 0

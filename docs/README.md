@@ -126,7 +126,7 @@ transitvpn down --client   # stop the client tunnel (record: state/tunnel-client
 
 Both roles use the same pidfd-bound ownership checks and never overwrite each other's process
 records. Starting a role whose config file is missing or invalid fails safely without touching
-the other role. `health --url http://...` sends its request through the imported client's
+the other role. `health --url http://...` or `health --url https://...` sends its request through the imported client's
 configured loopback SOCKS listener. To stop everything, run `down --client` and then `down`.
 Recovery after a crash is `down --client` (or `down`) followed by `up --client` (or `up`).
 
@@ -295,22 +295,25 @@ requests, set `TRANSITVPN_EGRESS_CANARY=1` and run the test with the pinned Xray
 TRANSITVPN_EGRESS_CANARY=1 pytest tests/test_internet_egress_canary.py
 ```
 
-The opted-in canary keeps the managed server inbound, the imported client SOCKS listener
-and the fresh TLS 1.3 REALITY cover fixture on IPv4 127.0.0.1. It sends two bounded,
-unauthenticated `GET https://example.com/` requests on TCP 443 through the imported
-client's loopback SOCKS listener with an ordinary `curl` client, using `socks5h` and
-certificate verification, with no redirects or POSTs. The first and the post-restart
-request must both return HTTPS 200; an intervening request while the server is down must
-fail while the client remains live. Fixture routing sends only `full:example.com` TCP
-443 to a uniquely tagged IPv4 freedom outbound and sends all other routed traffic to a
-blackhole outbound. No public or LAN listener is opened. It does not demonstrate remote
-VPN ingress, phone or Mac import, DNS leak guarantees, or reachability from Beijing.
+The opted-in canary keeps the managed server inbound, imported client SOCKS listener,
+and fresh TLS 1.3 REALITY cover fixture on IPv4 127.0.0.1. It makes six bounded request
+attempts to `https://example.com/` on TCP 443: the product `health` CLI and `curl` each
+make one request after startup, one while the server is down, and one after restart. The
+four startup and post-restart requests must return verified HTTPS 200; both down-state
+requests must fail while the client remains live. The health CLI uses the configured
+loopback SOCKS listener; curl uses `socks5h`, certificate verification, no redirects, and
+no POSTs. Fixture routing sends only `full:example.com` TCP 443 to a uniquely tagged
+IPv4 freedom outbound and sends all other routed traffic to a blackhole outbound. No
+public or LAN listener is opened. It does not demonstrate remote VPN ingress, phone or
+Mac import, DNS leak guarantees, or reachability from Beijing.
 
 ## Local checks and limits
 
 `status` (server) and `status --client` (imported client) report whether the managed process appears live; they do not verify HTTP tunnel health.
-`health --url http://...` sends an HTTP request through the configured local SOCKS client and
-reports the observed response. It does not check process liveness or fall back to a direct request.
+`health --url http://...` sends an HTTP request through the configured local SOCKS client;
+`health --url https://...` sends a certificate-verified HTTPS request through that same SOCKS
+route. It reports the observed response, does not check process liveness, and never falls back to
+a direct request.
 
 `certify-local-tunnel` validates the pinned Xray binary and exercises a local plain VLESS RAW
 loopback HTTP path. The exported-profile acceptance also reconstructs the URI into an Xray client

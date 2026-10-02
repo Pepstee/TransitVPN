@@ -123,9 +123,9 @@ def build_parser() -> argparse.ArgumentParser:
         service_p.add_argument("--name", required=True, help="Short installation name")
 
     health_p = subparsers.add_parser(
-        "health", help="Request HTTP health through the configured local SOCKS tunnel"
+        "health", help="Request HTTP or HTTPS health through the configured local SOCKS tunnel"
     )
-    health_p.add_argument("--url", required=True, help="Plain HTTP health URL to request through Xray")
+    health_p.add_argument("--url", required=True, help="HTTP or HTTPS health URL to request through Xray")
     health_p.add_argument(
         "--timeout", type=float, default=5.0, metavar="SECONDS",
         help="Request timeout in seconds (default: 5; maximum: 30)",
