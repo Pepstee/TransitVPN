@@ -228,6 +228,9 @@ raise SystemExit(23)
                 target="cover.example.test:443",
                 server_name="cover.example.test",
                 target_verified=True,
+                listen=None,
+                port=443,
+                socks_port=10808,
                 xray_binary=str(candidate),
                 dry_run=False,
             )
