@@ -12,6 +12,40 @@ TransitVPN generates a matched Xray client/server pair for VLESS over REALITY RA
 with its native config test. The non-secret identity record contains only the version and
 SHA-256 digest of the executable.
 
+## Offline application source upgrade and rollback
+
+The application release command updates tracked source files in an existing installation from
+full commit IDs in a trusted local Git repository. It performs no network access, checkout,
+dependency installation, Xray replacement, or service-manager operation. The package version
+reported by `transitvpn --version` remains the package version; release identity is the full Git
+commit hash.
+
+Stop every process and service that uses the destination before updating. The command cannot
+find arbitrary consumers. Use an existing local repository and a separate existing non-Git
+installation directory:
+
+```console
+transitvpn upgrade \
+  --source-repo /srv/artvault/projects/transitvpn/workspace \
+  --destination /path/to/existing-installation \
+  --expected-current B_FULL_GIT_COMMIT \
+  --revision C_FULL_GIT_COMMIT
+
+transitvpn rollback \
+  --source-repo /srv/artvault/projects/transitvpn/workspace \
+  --destination /path/to/existing-installation \
+  --expected-current C_FULL_GIT_COMMIT \
+  --revision B_FULL_GIT_COMMIT
+```
+
+Only complete 40-character commit IDs are accepted. The destination must already contain the
+expected tracked release, and its `.git` metadata, changed dependencies, symlinks, special files,
+unexpected tracked-file edits, and collisions with untracked files are refused. Existing runtime
+state and unrelated files are left in place. Run the reverse `rollback` operation to restore a
+previous application-source commit. This procedure does not upgrade dependencies or promise
+power-loss atomicity across multiple files; it recovers caught failures only while its own writes
+remain identifiable.
+
 ## Generate a deployment
 
 Choose and verify a suitable REALITY target from the eventual server network: it must be reachable,

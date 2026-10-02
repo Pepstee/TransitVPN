@@ -190,6 +190,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the pinned Xray executable",
     )
 
+    for release_command, description in (
+        ("upgrade", "Upgrade application source to a trusted local Git revision"),
+        ("rollback", "Roll back application source to a trusted local Git revision"),
+    ):
+        release_p = subparsers.add_parser(release_command, help=description)
+        release_p.add_argument("--source-repo", type=Path, required=True)
+        release_p.add_argument("--destination", type=Path, required=True)
+        release_p.add_argument("--expected-current", required=True, metavar="COMMIT")
+        release_p.add_argument("--revision", required=True, metavar="COMMIT")
+
     bootstrap_p = subparsers.add_parser(
         "bootstrap", help="Generate and validate matching Xray server/client configs"
     )
@@ -267,6 +277,29 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
         _atomic_write(Path("state") / "xray-identity.json", operator_identity)
         print("wrote permission-restricted server/client configs and binary identity to state/")
 
+    return 0
+
+
+def _cmd_release_update(args: argparse.Namespace) -> int:
+    from transitvpn.release import ReleaseError, apply_release
+
+    try:
+        result = apply_release(
+            args.source_repo,
+            args.destination,
+            args.expected_current,
+            args.revision,
+        )
+    except ReleaseError as exc:
+        print(f"{args.command}: error: {exc}", file=sys.stderr)
+        return 1
+    if result.no_op:
+        print(f"{args.command}: already at {result.new_revision}; changed files=0")
+    else:
+        print(
+            f"{args.command}: applied {result.old_revision} -> {result.new_revision}; "
+            f"changed files={result.changed_file_count}"
+        )
     return 0
 
 
@@ -521,6 +554,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
+
+    if args.command in {"upgrade", "rollback"}:
+        return _cmd_release_update(args)
 
     if args.command == "certify-local-tunnel":
         return _cmd_certify_local_tunnel(args)
