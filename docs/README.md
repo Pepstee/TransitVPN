@@ -130,13 +130,74 @@ the other role. `health --url http://...` sends its request through the imported
 configured loopback SOCKS listener. To stop everything, run `down --client` and then `down`.
 Recovery after a crash is `down --client` (or `down`) followed by `up --client` (or `up`).
 
+## Private configuration backup and restore
+
+The primary deployment's `state/` contains long-term credentials. Use only the explicit
+private two-file workflow below; do not copy the repository, runtime, PID files, logs or
+other state. Choose a new backup directory under an existing private parent. The product
+requires the parent and backup directory to be owned by the current user with mode 0700,
+creates backup files with mode 0600, refuses symlinks or an existing destination, and
+copies only `xray-server.json` and `xray-client.json`.
+
+Create the private parent once. For each backup, use a new absolute destination path, stop the
+imported client in its existing client work directory, then stop and back up the primary server
+from its server work directory:
+
+```console
+set -eu
+umask 077
+# One-time setup for this private backup parent:
+mkdir -m 700 "$HOME/transitvpn-backups"
+# If it already exists, verify owner and mode 0700; do not rerun mkdir.
+SERVER_WORKDIR=/absolute/path/to/server-deployment
+CLIENT_WORKDIR=/absolute/path/to/existing-imported-client
+BACKUP="$HOME/transitvpn-backups/$(date -u +%Y%m%dT%H%M%SZ)"
+( cd "$CLIENT_WORKDIR" && transitvpn down --client )
+( cd "$SERVER_WORKDIR" && transitvpn down && transitvpn config-backup --destination "$BACKUP" )
+```
+
+For recovery after both server configuration files are absent, explicitly choose the absolute
+path of a trusted private backup in this recovery shell. Stop the existing imported client and
+server through their respective product work directories. Restore and start the server there;
+then start and check the unchanged imported client profile in its existing client work directory:
+
+```console
+set -eu
+SERVER_WORKDIR=/absolute/path/to/server-deployment
+CLIENT_WORKDIR=/absolute/path/to/existing-imported-client
+BACKUP=/absolute/path/to/trusted/private/backup
+PINNED_XRAY=/absolute/path/to/pinned/xray
+( cd "$CLIENT_WORKDIR" && transitvpn down --client )
+( cd "$SERVER_WORKDIR" && transitvpn down && transitvpn config-restore --source "$BACKUP" --xray-binary "$PINNED_XRAY" && transitvpn up )
+( cd "$CLIENT_WORKDIR" && transitvpn up --client && transitvpn health --url http://127.0.0.1:PORT/health )
+```
+
+Restore does not import a new client profile or alter the existing imported-client directory.
+
+Restore refuses any `tunnel.pid` or `tunnel-client.pid` filesystem entry and refuses to
+overwrite either existing config. It accepts exactly the two private regular single-link
+files, validates both with the byte-pinned Xray executable before writing, restores mode
+0600, and compares the restored bytes with the backup. The two-file restore is not an
+atomic transaction: an interruption between file writes can leave one config restored;
+inspect `state/` before retrying. The command prints only a generic result.
+
+The directory is trusted storage for reusable long-term credentials. In-process SHA-256
+comparisons detect copy changes; they do not authenticate an untrusted backup. Protect the
+backup location and restore only a backup whose provenance you trust. Restoration reuses
+the credentials in that backup; an older backup can re-enable revoked client identities.
+If credentials may be compromised or revoked, generate a new deployment, distribute its
+client profile through a secure channel, and retire the old UUID/short ID instead of
+restoring those credentials. Never publish, log, commit or make ad hoc backups of `state/`;
+this explicit private workflow is the supported backup/restore exception.
+
 ## Current evidence scope
 
 The pinned-Xray acceptance test exercises the whole local workflow through product entrypoints:
 server `up`, `export-profile`, `import-profile` into a private client state directory, client
 `up --client`, a real HTTP request through the client's SOCKS listener via the `health` CLI with
-responder evidence, `down --client` with unavailable traffic, `up --client` again with
-successful traffic, and final `down` of both roles. All listeners are on 127.0.0.1 and the
+responder evidence, private two-file config backup, simulated config loss, refusal to start
+with missing state, pinned-Xray validation and restoration, continued HTTP with the unchanged
+imported client config, and final `down` of both roles. All listeners are on 127.0.0.1 and the
 REALITY target is a locally generated TLS 1.3 fixture, so this is a loopback proof only.
 External endpoint reachability, phone or Mac app import, DNS leak guarantees, and reachability
 from Beijing are unverified. The profile carries the supported peer settings only, not
@@ -181,6 +242,8 @@ implemented. Standalone Shadowsocks and WireGuard have classifiable traffic patt
 represented as censorship-resistant recovery. Until an independent endpoint is provisioned and
 tested, recovery remains unprovisioned.
 
-Never publish, log, commit, or reuse files in `state/`; they contain long-term credentials. Rotate
-by generating a new deployment, validating both peers, distributing the new client file through a
-secure channel, and then removing the old UUID/short ID from the live server.
+Never publish, log, commit, or make ad hoc backups of files in `state/`; they contain long-term
+credentials. The private `config-backup` and `config-restore` procedure above is the only supported
+backup/restore path. Restoration reuses credentials from a trusted backup. To rotate, create a
+new deployment, validate both peers, distribute the new client file through a
+secure channel, and remove the old UUID/short ID from the live server.

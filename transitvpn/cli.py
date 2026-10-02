@@ -131,6 +131,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replace an existing stopped client config after validation",
     )
 
+    backup_p = subparsers.add_parser(
+        "config-backup",
+        help="Back up the stopped deployment's two Xray configs privately",
+    )
+    backup_p.add_argument(
+        "--destination", type=Path, required=True,
+        help="New backup directory under an existing private directory",
+    )
+
+    restore_p = subparsers.add_parser(
+        "config-restore",
+        help="Restore missing Xray configs from a trusted private backup",
+    )
+    restore_p.add_argument(
+        "--source", type=Path, required=True,
+        help="Private backup directory created by config-backup",
+    )
+    restore_p.add_argument(
+        "--xray-binary", default=os.environ.get("TRANSITVPN_XRAY_BIN", "xray"),
+        help="Path to the pinned Xray executable",
+    )
+
     bootstrap_p = subparsers.add_parser(
         "bootstrap", help="Generate and validate matching Xray server/client configs"
     )
@@ -364,6 +386,36 @@ def _cmd_import_profile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_config_backup(args: argparse.Namespace) -> int:
+    from transitvpn.config_backup import ConfigBackupError, backup_configs
+
+    try:
+        backup_configs(Path("state"), args.destination)
+    except ConfigBackupError:
+        print(
+            "config-backup: error: private configuration backup was refused",
+            file=sys.stderr,
+        )
+        return 1
+    print("config-backup: private configuration backup created")
+    return 0
+
+
+def _cmd_config_restore(args: argparse.Namespace) -> int:
+    from transitvpn.config_backup import ConfigBackupError, restore_configs
+
+    try:
+        restore_configs(Path("state"), args.source, xray_binary=args.xray_binary)
+    except ConfigBackupError:
+        print(
+            "config-restore: error: trusted configuration backup could not be restored",
+            file=sys.stderr,
+        )
+        return 1
+    print("config-restore: trusted configuration backup restored and validated")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -392,6 +444,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "import-profile":
         return _cmd_import_profile(args)
+
+    if args.command == "config-backup":
+        return _cmd_config_backup(args)
+
+    if args.command == "config-restore":
+        return _cmd_config_restore(args)
 
     if args.command == "bootstrap":
         return _cmd_bootstrap(args)

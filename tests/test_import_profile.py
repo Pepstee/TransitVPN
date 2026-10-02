@@ -713,6 +713,7 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
             raise AssertionError("import modified the exported profile")
         client_config_path = client_workdir / "state" / "xray-client.json"
         assert stat.S_IMODE(client_config_path.stat().st_mode) == 0o600
+        imported_client_config = client_config_path.read_bytes()
 
         client_up = run_cli(client_workdir, "up", "--client")
         assert client_up.returncode == 0
@@ -730,22 +731,109 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
         client_status = run_cli(client_workdir, "status", "--client")
         assert "status: live process (pid=" in client_status.stdout
 
-        client_down = run_cli(client_workdir, "down", "--client")
-        assert client_down.returncode == 0
-        unavailable = run_cli(
+        client_down_for_backup = run_cli(client_workdir, "down", "--client")
+        assert client_down_for_backup.returncode == 0
+        server_down_for_backup = run_cli(server_workdir, "down")
+        assert server_down_for_backup.returncode == 0
+        server_state = server_workdir / "state"
+        server_config_paths = {
+            name: server_state / name
+            for name in ("xray-server.json", "xray-client.json")
+        }
+        original_server_configs = {
+            name: path.read_bytes() for name, path in server_config_paths.items()
+        }
+        backup_parent = tmp_path / "private-backups"
+        backup_parent.mkdir(mode=0o700)
+        backup_path = backup_parent / "recovery"
+        backed_up = run_cli(
+            server_workdir,
+            "config-backup",
+            "--destination",
+            str(backup_path),
+        )
+        assert backed_up.returncode == 0
+        assert backed_up.stdout == "config-backup: private configuration backup created\n"
+        assert backed_up.stderr == ""
+        assert stat.S_IMODE(backup_path.stat().st_mode) == 0o700
+        assert sorted(path.name for path in backup_path.iterdir()) == [
+            "xray-client.json",
+            "xray-server.json",
+        ]
+        for name, original in original_server_configs.items():
+            backup_file = backup_path / name
+            backup_info = backup_file.stat()
+            assert stat.S_ISREG(backup_info.st_mode)
+            assert stat.S_IMODE(backup_info.st_mode) == 0o600
+            assert backup_info.st_nlink == 1
+            if backup_file.read_bytes() != original:
+                raise AssertionError("private backup did not preserve configuration bytes")
+
+        for path in server_config_paths.values():
+            path.unlink()
+        missing_server_up = run_cli(server_workdir, "up")
+        assert missing_server_up.returncode == 1
+        assert not (server_state / "tunnel.pid").exists()
+
+        client_up_for_loss_check = run_cli(client_workdir, "up", "--client")
+        assert client_up_for_loss_check.returncode == 0
+        _wait_port_open(socks_port)
+        missing_config_health = run_cli(
             client_workdir, "health", "--url", health_url, "--timeout", "2"
         )
-        assert unavailable.returncode == 1
-        unavailable_record = json.loads(unavailable.stdout)
-        assert unavailable_record["health"] == "unhealthy"
-        assert unavailable_record["http_observed"] is False
+        assert missing_config_health.returncode == 1
+        missing_config_health_record = json.loads(missing_config_health.stdout)
+        assert missing_config_health_record["health"] == "unhealthy"
+        assert missing_config_health_record["http_observed"] is False
+        assert responder.request_count == 1
+
+        client_down_before_restore = run_cli(client_workdir, "down", "--client")
+        assert client_down_before_restore.returncode == 0
+        restored = run_cli(
+            server_workdir,
+            "config-restore",
+            "--source",
+            str(backup_path),
+            "--xray-binary",
+            executable,
+        )
+        assert restored.returncode == 0
+        assert restored.stdout == (
+            "config-restore: trusted configuration backup restored and validated\n"
+        )
+        assert restored.stderr == ""
+        for name, original in original_server_configs.items():
+            restored_file = server_config_paths[name]
+            restored_info = restored_file.stat()
+            assert stat.S_ISREG(restored_info.st_mode)
+            assert stat.S_IMODE(restored_info.st_mode) == 0o600
+            assert restored_info.st_nlink == 1
+            if restored_file.read_bytes() != original:
+                raise AssertionError("restored configuration did not match trusted backup")
+
+        server_up_again = run_cli(server_workdir, "up")
+        assert server_up_again.returncode == 0
+        _wait_port_open(server_port)
+        client_still_down = run_cli(
+            client_workdir, "health", "--url", health_url, "--timeout", "2"
+        )
+        assert client_still_down.returncode == 1
+        client_still_down_record = json.loads(client_still_down.stdout)
+        assert client_still_down_record["health"] == "unhealthy"
+        assert client_still_down_record["http_observed"] is False
         assert responder.request_count == 1
 
         client_up_again = run_cli(client_workdir, "up", "--client")
         assert client_up_again.returncode == 0
         _wait_port_open(socks_port)
+        if client_config_path.read_bytes() != imported_client_config:
+            raise AssertionError("restore changed the imported client configuration")
         healthy_again = run_cli(client_workdir, "health", "--url", health_url)
         assert healthy_again.returncode == 0
+        healthy_again_record = json.loads(healthy_again.stdout)
+        assert healthy_again_record["health"] == "healthy"
+        assert healthy_again_record["http_observed"] is True
+        assert healthy_again_record["route"] == "configured_socks"
         assert responder.request_count == 2
 
         client_down_for_refresh = run_cli(client_workdir, "down", "--client")
