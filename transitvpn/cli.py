@@ -162,6 +162,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replace an existing stopped client config after validation",
     )
 
+    recovery_pack_p = subparsers.add_parser(
+        "export-recovery-pack",
+        help="Export a private offline client profile and recovery guide",
+    )
+    recovery_pack_p.add_argument(
+        "--destination", type=Path, required=True,
+        help="New private pack directory under an existing private directory",
+    )
+
     backup_p = subparsers.add_parser(
         "config-backup",
         help="Back up the stopped deployment's two Xray configs privately",
@@ -512,6 +521,21 @@ def _cmd_import_profile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_export_recovery_pack(args: argparse.Namespace) -> int:
+    from transitvpn.recovery_pack import RecoveryPackError, export_recovery_pack
+
+    try:
+        export_recovery_pack(Path("state") / "xray-client.json", args.destination)
+    except RecoveryPackError:
+        print(
+            "export-recovery-pack: error: private recovery pack was refused",
+            file=sys.stderr,
+        )
+        return 1
+    print("export-recovery-pack: private recovery pack created")
+    return 0
+
+
 def _cmd_config_backup(args: argparse.Namespace) -> int:
     from transitvpn.config_backup import ConfigBackupError, backup_configs
 
@@ -586,6 +610,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "import-profile":
         return _cmd_import_profile(args)
+
+    if args.command == "export-recovery-pack":
+        return _cmd_export_recovery_pack(args)
 
     if args.command == "config-backup":
         return _cmd_config_backup(args)
