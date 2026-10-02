@@ -28,6 +28,24 @@ transitvpn bootstrap \
   --xray-binary /usr/local/bin/xray
 ```
 
+For a local-only deployment, bootstrap can bind the server and choose the peer and client SOCKS
+ports explicitly. These values are also written into the matching client configuration:
+
+```console
+transitvpn bootstrap \
+  --host 127.0.0.1 \
+  --listen 127.0.0.1 \
+  --port 18443 \
+  --socks-port 18080 \
+  --target verified-target.example:443 \
+  --server-name verified-target.example \
+  --target-verified \
+  --xray-binary /usr/local/bin/xray
+```
+
+`--listen` accepts an IPv4 or IPv6 literal. When omitted, the server listener behavior remains
+unchanged. Ports must be in the range 1–65535; the client SOCKS listener remains loopback-only.
+
 This creates `state/xray-server.json`, `state/xray-client.json`, and `state/xray-identity.json`
 with mode 0600. Each run creates a new UUID, X25519 key pair, and non-empty 16-hex-character short
 ID. `state/` is ignored by Git. Use `--dry-run` to perform the same generation and real-binary

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import dataclass, field
 
@@ -104,10 +105,20 @@ class XrayDeployment:
     port: int = 443
     socks_port: int = 10808
     fingerprint: str = "chrome"
+    listen: str | None = None
 
     def __post_init__(self) -> None:
         if not self.server or not self.server_name:
             raise ValueError("server and server_name must not be empty")
+        if self.listen is not None:
+            if not isinstance(self.listen, str):
+                raise ValueError("listen must be a literal IPv4 or IPv6 address")
+            try:
+                ipaddress.ip_address(self.listen)
+            except ValueError:
+                raise ValueError(
+                    "listen must be a literal IPv4 or IPv6 address"
+                ) from None
         if not self.target_verified:
             raise ValueError("REALITY target must be deliberately verified")
         host, separator, port = self.target.rpartition(":")

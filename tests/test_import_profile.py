@@ -376,7 +376,6 @@ def _port_is_closed(port: int, timeout: float = 0.2) -> bool:
 def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
     from transitvpn import xray as xray_module
     from transitvpn import xray_certification as certification
-    from transitvpn.server import build_server_config
     from transitvpn.tunnel import get_status
 
     binary = os.environ.get("TRANSITVPN_XRAY_BIN", "xray")
@@ -387,10 +386,9 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
 
     body_secret = secrets.token_hex(24)
     body = ("transitvpn-import-workflow:" + body_secret).encode("ascii")
-    keys = generate_keys()
-    server_short_id = generate_short_id()
     server_name = "cover.example.test"
     outputs: list[str] = []
+    generated_secrets: set[str] = set()
     server_workdir = tmp_path / "server"
     client_workdir = tmp_path / "client"
     server_workdir.mkdir(mode=0o700)
@@ -440,6 +438,15 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
         responder_thread.start()
         target_thread.start()
 
+        # The --target-verified assertion below follows an actual trusted
+        # TLS 1.3 handshake to this fresh loopback cover fixture.
+        target_context = ssl.create_default_context(cafile=str(certificate_path))
+        target_context.minimum_version = ssl.TLSVersion.TLSv1_3
+        target_context.maximum_version = ssl.TLSVersion.TLSv1_3
+        with socket.create_connection(target.server_address, timeout=3) as raw:
+            with target_context.wrap_socket(raw, server_hostname=server_name) as tls:
+                assert tls.version() == "TLSv1.3"
+
         used = {int(responder.server_address[1]), int(target.server_address[1])}
 
         def fresh_port() -> int:
@@ -451,18 +458,37 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
 
         server_port = fresh_port()
         socks_port = fresh_port()
-        deployment = XrayDeployment(
-            keys=keys,
-            server=_LOOPBACK,
-            target=f"{_LOOPBACK}:{target.server_address[1]}",
-            server_name=server_name,
-            short_id=server_short_id,
-            target_verified=True,
-            port=server_port,
-            socks_port=socks_port,
+        bootstrapped = run_cli(
+            server_workdir,
+            "bootstrap",
+            "--host", _LOOPBACK,
+            "--listen", _LOOPBACK,
+            "--port", str(server_port),
+            "--socks-port", str(socks_port),
+            "--target", f"{_LOOPBACK}:{target.server_address[1]}",
+            "--server-name", server_name,
+            "--target-verified",
+            "--xray-binary", executable,
         )
-        server_config = build_server_config(deployment)
-        server_config["inbounds"][0]["listen"] = _LOOPBACK
+        assert bootstrapped.returncode == 0
+        server_state = server_workdir / "state"
+        server_config = json.loads(
+            (server_state / "xray-server.json").read_text(encoding="utf-8")
+        )
+        client_config = json.loads(
+            (server_state / "xray-client.json").read_text(encoding="utf-8")
+        )
+        server_inbound = server_config["inbounds"][0]
+        client_peer = client_config["outbounds"][0]["settings"]["vnext"][0]
+        client_socks = client_config["inbounds"][0]
+        assert server_inbound["listen"] == _LOOPBACK
+        assert server_inbound["port"] == server_port
+        assert client_peer["address"] == _LOOPBACK
+        assert client_peer["port"] == server_port
+        assert client_socks["listen"] == _LOOPBACK
+        assert client_socks["port"] == socks_port
+        # Xray rejects private VLESS destinations by default. Keep this local
+        # canary's server egress limited to the two loopback fixtures.
         server_config["outbounds"][0]["settings"] = {
             "targetStrategy": "ForceIPv4",
             "finalRules": [
@@ -480,14 +506,19 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
                 },
             ],
         }
-        client_config = build_generated_client(deployment)
         xray_module.validate_configs(
             {"server": server_config, "client": client_config}, binary=executable
         )
-        server_state = server_workdir / "state"
-        server_state.mkdir(mode=0o700)
         certification._write_config(server_state / "xray-server.json", server_config)
-        certification._write_config(server_state / "xray-client.json", client_config)
+        server_account = server_inbound["settings"]["clients"][0]
+        server_reality = server_inbound["streamSettings"]["realitySettings"]
+        client_reality = client_config["outbounds"][0]["streamSettings"]["realitySettings"]
+        generated_secrets.update((
+            server_account["id"],
+            server_reality["privateKey"],
+            client_reality["publicKey"],
+            server_reality["shortIds"][0],
+        ))
 
         server_up = run_cli(server_workdir, "up")
         assert server_up.returncode == 0
@@ -598,20 +629,15 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
                 profile_uri_text = profile_path.read_text(encoding="utf-8").strip()
         except OSError:
             cleanup_failed = True
-        generated_secrets = (
-            body_secret,
-            keys.vless_uuid,
-            keys.reality_private_key,
-            keys.reality_public_key,
-            keys.ss_password,
-            server_short_id,
-            *((profile_uri_text,) if profile_uri_text else ()),
-        )
+        generated_secrets.add(body_secret)
+        if profile_uri_text:
+            generated_secrets.add(profile_uri_text)
+        scan_values = tuple(generated_secrets)
         secret_scan_failed = any(
-            secret in output for secret in generated_secrets for output in outputs
+            secret in output for secret in scan_values for output in outputs
         )
         try:
-            _assert_absent_from_repository(unittest.TestCase(), generated_secrets)
+            _assert_absent_from_repository(unittest.TestCase(), scan_values)
         except (AssertionError, OSError, UnicodeError):
             secret_scan_failed = True
         active_exception = sys.exc_info()[1]

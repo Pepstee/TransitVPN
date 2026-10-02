@@ -1,12 +1,36 @@
 """Command-line interface for transitvpn."""
 
 import argparse
+import ipaddress
 import json
 import math
 import os
 import sys
 import tempfile
 from pathlib import Path
+
+
+def _port_number(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "port must be an integer between 1 and 65535"
+        ) from None
+    if not 0 < port < 65536:
+        raise argparse.ArgumentTypeError(
+            "port must be an integer between 1 and 65535"
+        )
+    return port
+
+
+def _listen_address(value: str) -> str:
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "listen must be a literal IPv4 or IPv6 address"
+        ) from None
 
 
 def _atomic_write(path: Path, data: dict) -> None:
@@ -117,6 +141,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bootstrap_p.add_argument("--target", required=True, metavar="HOST:PORT",
                              help="Deliberately selected REALITY target")
+    bootstrap_p.add_argument(
+        "--listen", metavar="ADDRESS", type=_listen_address, default=None,
+        help="Literal IPv4/IPv6 server bind address (default: Xray behavior)",
+    )
+    bootstrap_p.add_argument(
+        "--port", metavar="PORT", type=_port_number, default=443,
+        help="VLESS peer port (default: 443)",
+    )
+    bootstrap_p.add_argument(
+        "--socks-port", metavar="PORT", type=_port_number, default=10808,
+        help="Local client SOCKS port (default: 10808)",
+    )
     bootstrap_p.add_argument("--server-name", required=True, metavar="SNI",
                              help="SNI accepted by the verified target")
     bootstrap_p.add_argument(
@@ -138,7 +174,8 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
     deployment = XrayDeployment(
         keys=generate_keys(), server=args.host, target=args.target,
         server_name=args.server_name, short_id=generate_short_id(),
-        target_verified=args.target_verified,
+        target_verified=args.target_verified, listen=args.listen,
+        port=args.port, socks_port=args.socks_port,
     )
     server_cfg = build_server_config(deployment)
     client_cfg = build_client_config(deployment)

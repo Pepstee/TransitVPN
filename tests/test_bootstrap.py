@@ -68,6 +68,69 @@ class TestBootstrapRequiredArguments:
         assert not (tmp_path / "state").exists()
 
 
+class TestBootstrapEndpointOptions:
+    ENDPOINT = ["--listen", "127.0.0.1", "--port", "18443",
+                "--socks-port", "18080"]
+
+    def test_selected_endpoints_are_written_to_matching_configs(
+        self, run_in_tmp, tmp_path
+    ):
+        code, _ = run_in_tmp(["bootstrap", *self.ENDPOINT])
+        assert code == 0
+        server = read_state(tmp_path, "xray-server.json")
+        client = read_state(tmp_path, "xray-client.json")
+        inbound = server["inbounds"][0]
+        peer = client["outbounds"][0]["settings"]["vnext"][0]
+        socks = client["inbounds"][0]
+        assert inbound["listen"] == "127.0.0.1"
+        assert inbound["port"] == 18443
+        assert peer["address"] == "vpn.example"
+        assert peer["port"] == inbound["port"]
+        assert socks["listen"] == "127.0.0.1"
+        assert socks["port"] == 18080
+
+    def test_omitted_options_preserve_existing_defaults(self, run_in_tmp, tmp_path):
+        run_in_tmp()
+        server = read_state(tmp_path, "xray-server.json")
+        client = read_state(tmp_path, "xray-client.json")
+        assert "listen" not in server["inbounds"][0]
+        assert server["inbounds"][0]["port"] == 443
+        assert client["inbounds"][0]["listen"] == "127.0.0.1"
+        assert client["inbounds"][0]["port"] == 10808
+
+    @pytest.mark.parametrize("listen", ["vpn.example", "127.0.0.1:443",
+                                        "256.0.0.1", ""])
+    def test_non_ip_listener_is_rejected_before_key_generation(
+        self, tmp_path, monkeypatch, listen
+    ):
+        monkeypatch.chdir(tmp_path)
+        with patch("transitvpn.keygen.generate_keys") as keygen:
+            with patch("transitvpn.keygen.generate_short_id") as short_id:
+                with pytest.raises(SystemExit) as raised:
+                    main(["bootstrap", "--listen", listen, *_ARGUMENTS])
+        assert raised.value.code == 2
+        keygen.assert_not_called()
+        short_id.assert_not_called()
+        assert not (tmp_path / "state").exists()
+
+    @pytest.mark.parametrize("option,value", [
+        ("--port", "0"), ("--port", "65536"), ("--port", "-1"),
+        ("--port", "bad"), ("--socks-port", "0"),
+        ("--socks-port", "65536"), ("--socks-port", "bad"),
+    ])
+    def test_invalid_port_is_rejected_before_key_generation(
+        self, tmp_path, monkeypatch, option, value
+    ):
+        monkeypatch.chdir(tmp_path)
+        with patch("transitvpn.keygen.generate_keys") as keygen:
+            with patch("transitvpn.keygen.generate_short_id") as short_id:
+                with pytest.raises(SystemExit) as raised:
+                    main(["bootstrap", option, value, *_ARGUMENTS])
+        assert raised.value.code == 2
+        keygen.assert_not_called()
+        short_id.assert_not_called()
+        assert not (tmp_path / "state").exists()
+
 class TestBootstrapReturnCode:
     @pytest.mark.parametrize("dry_run", [False, True])
     def test_validated_run_returns_zero(self, run_in_tmp, dry_run):

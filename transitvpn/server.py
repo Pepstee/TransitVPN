@@ -9,24 +9,27 @@ from transitvpn.keygen import Keys
 
 
 def build_server_config(deployment: XrayDeployment) -> dict[str, Any]:
+    inbound: dict[str, Any] = {
+        "port": deployment.port,
+        "protocol": "vless",
+        "settings": {"clients": [{"id": deployment.keys.vless_uuid,
+                                    "flow": "xtls-rprx-vision"}],
+                     "decryption": "none"},
+        "streamSettings": {
+            "network": "raw", "security": "reality",
+            "realitySettings": {
+                "show": False, "target": deployment.target,
+                "serverNames": [deployment.server_name],
+                "privateKey": deployment.keys.reality_private_key,
+                "shortIds": [deployment.short_id],
+            },
+        },
+    }
+    if deployment.listen is not None:
+        inbound["listen"] = deployment.listen
     return {
         "log": {"loglevel": "warning"},
-        "inbounds": [{
-            "port": deployment.port,
-            "protocol": "vless",
-            "settings": {"clients": [{"id": deployment.keys.vless_uuid,
-                                        "flow": "xtls-rprx-vision"}],
-                         "decryption": "none"},
-            "streamSettings": {
-                "network": "raw", "security": "reality",
-                "realitySettings": {
-                    "show": False, "target": deployment.target,
-                    "serverNames": [deployment.server_name],
-                    "privateKey": deployment.keys.reality_private_key,
-                    "shortIds": [deployment.short_id],
-                },
-            },
-        }],
+        "inbounds": [inbound],
         "outbounds": [{"protocol": "freedom", "tag": "direct"}],
     }
 
@@ -61,6 +64,7 @@ def build_xray_config(keys: Keys, **kwargs: Any) -> dict[str, Any]:
         server_name=kwargs.pop("server_name", (kwargs.pop("server_names", [""]) or [""])[0]),
         short_id=kwargs.pop("short_id", (kwargs.pop("short_ids", [""]) or [""])[0]),
         target_verified=kwargs.pop("target_verified", False), port=kwargs.pop("port", 443),
+        listen=kwargs.pop("listen", None),
     )
     if kwargs:
         raise TypeError(f"unexpected arguments: {', '.join(kwargs)}")

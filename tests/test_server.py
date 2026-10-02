@@ -138,6 +138,18 @@ class TestXrayInbound:
         cfg = _verified_xray(keys, port=65535)
         assert _inbound(cfg)["port"] == 65535
 
+    def test_explicit_literal_listen_address_is_applied(self, keys):
+        cfg = _verified_xray(keys, listen="127.0.0.1")
+        assert _inbound(cfg)["listen"] == "127.0.0.1"
+
+    def test_default_listen_address_remains_unspecified(self, xray):
+        assert "listen" not in _inbound(xray)
+
+    @pytest.mark.parametrize("listen", ["vpn.example", "127.0.0.1:443", ""])
+    def test_non_literal_listen_address_is_rejected(self, keys, listen):
+        with pytest.raises(ValueError):
+            _verified_xray(keys, listen=listen)
+
 
 # ---------------------------------------------------------------------------
 # build_xray_config — VLESS client settings
