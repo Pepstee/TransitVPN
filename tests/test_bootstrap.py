@@ -15,7 +15,6 @@ import pytest
 from transitvpn.cli import main
 from transitvpn.xray import XRAY_VERSION
 
-
 _ARGUMENTS = [
     "--host", "vpn.example", "--target", "verified-target.example:443",
     "--server-name", "verified-target.example", "--target-verified",
@@ -69,8 +68,8 @@ class TestBootstrapRequiredArguments:
 
 
 class TestBootstrapEndpointOptions:
-    ENDPOINT = ["--listen", "127.0.0.1", "--port", "18443",
-                "--socks-port", "18080"]
+    ENDPOINT = ("--listen", "127.0.0.1", "--port", "18443",
+                "--socks-port", "18080")
 
     def test_selected_endpoints_are_written_to_matching_configs(
         self, run_in_tmp, tmp_path
@@ -104,10 +103,12 @@ class TestBootstrapEndpointOptions:
         self, tmp_path, monkeypatch, listen
     ):
         monkeypatch.chdir(tmp_path)
-        with patch("transitvpn.keygen.generate_keys") as keygen:
-            with patch("transitvpn.keygen.generate_short_id") as short_id:
-                with pytest.raises(SystemExit) as raised:
-                    main(["bootstrap", "--listen", listen, *_ARGUMENTS])
+        with (
+            patch("transitvpn.keygen.generate_keys") as keygen,
+            patch("transitvpn.keygen.generate_short_id") as short_id,
+            pytest.raises(SystemExit) as raised,
+        ):
+            main(["bootstrap", "--listen", listen, *_ARGUMENTS])
         assert raised.value.code == 2
         keygen.assert_not_called()
         short_id.assert_not_called()
@@ -122,10 +123,12 @@ class TestBootstrapEndpointOptions:
         self, tmp_path, monkeypatch, option, value
     ):
         monkeypatch.chdir(tmp_path)
-        with patch("transitvpn.keygen.generate_keys") as keygen:
-            with patch("transitvpn.keygen.generate_short_id") as short_id:
-                with pytest.raises(SystemExit) as raised:
-                    main(["bootstrap", option, value, *_ARGUMENTS])
+        with (
+            patch("transitvpn.keygen.generate_keys") as keygen,
+            patch("transitvpn.keygen.generate_short_id") as short_id,
+            pytest.raises(SystemExit) as raised,
+        ):
+            main(["bootstrap", option, value, *_ARGUMENTS])
         assert raised.value.code == 2
         keygen.assert_not_called()
         short_id.assert_not_called()
@@ -265,6 +268,7 @@ class TestMatchedClientAndServer:
 
     def test_public_key_cryptographically_matches_private_key(self, peers):
         import base64
+
         from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
         from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
         server, client = peers

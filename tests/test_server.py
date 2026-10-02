@@ -10,7 +10,6 @@ import pytest
 from transitvpn.keygen import Keys, generate_keys
 from transitvpn.server import build_ss_config, build_xray_config
 
-
 _TARGET = "verified-target.example:443"
 _SERVER_NAME = "verified-target.example"
 _SHORT_ID = "a1b2c3d4"
@@ -18,8 +17,8 @@ _SHORT_ID = "a1b2c3d4"
 
 def _verified_xray(keys: Keys, **overrides) -> dict:
     """Supply explicit synthetic deployment inputs; no network verification claim."""
-    inputs = dict(target=_TARGET, server_name=_SERVER_NAME,
-                  short_id=_SHORT_ID, target_verified=True)
+    inputs = {"target": _TARGET, "server_name": _SERVER_NAME,
+              "short_id": _SHORT_ID, "target_verified": True}
     inputs.update(overrides)
     return build_xray_config(keys, **inputs)
 

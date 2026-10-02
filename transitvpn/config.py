@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 
 from transitvpn.keygen import Keys
 
-
 _SHORT_ID = re.compile(r"^(?:[0-9a-f]{2}){1,8}$")
 
 

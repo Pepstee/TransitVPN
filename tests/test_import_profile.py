@@ -443,9 +443,11 @@ def test_pinned_xray_import_profile_workflow_canary(tmp_path: Path) -> None:
         target_context = ssl.create_default_context(cafile=str(certificate_path))
         target_context.minimum_version = ssl.TLSVersion.TLSv1_3
         target_context.maximum_version = ssl.TLSVersion.TLSv1_3
-        with socket.create_connection(target.server_address, timeout=3) as raw:
-            with target_context.wrap_socket(raw, server_hostname=server_name) as tls:
-                assert tls.version() == "TLSv1.3"
+        with (
+            socket.create_connection(target.server_address, timeout=3) as raw,
+            target_context.wrap_socket(raw, server_hostname=server_name) as tls,
+        ):
+            assert tls.version() == "TLSv1.3"
 
         used = {int(responder.server_address[1]), int(target.server_address[1])}
 
